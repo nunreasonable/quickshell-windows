@@ -12,6 +12,7 @@
 #include <qpointer.h>
 #include <qqml.h>
 #include <qquickwindow.h>
+#include <qrawfont.h>
 #include <qstring.h>
 #include <qtimer.h>
 
@@ -60,6 +61,7 @@ void loadBundledFonts() {
 
 	auto userFontsDir = QDir(qEnvironmentVariable("LocalAppData") + "/Microsoft/Windows/Fonts");
 	auto skipPeruser = allPeruserFontsPresent(dir, userFontsDir);
+	auto installedFamilies = QFontDatabase::families();
 
 	enum class Select { NonPeruser, PeruserRegularOnly, PeruserAll };
 
@@ -78,6 +80,11 @@ void loadBundledFonts() {
 
 			if (which == Select::NonPeruser) {
 				if (isPeruser) continue;
+				auto family = QRawFont(path, 12).familyName();
+				if (!family.isEmpty() && installedFamilies.contains(family, Qt::CaseInsensitive)) {
+					qInfo() << "Using the installed" << family << "instead of the bundled" << name;
+					continue;
+				}
 			} else if (which == Select::PeruserRegularOnly) {
 				if (!isPeruser || name.compare(PERUSER_FONT_REGULAR_FILE, Qt::CaseInsensitive) != 0)
 					continue;
