@@ -1,4 +1,6 @@
 #include "virtual_desktops.hpp"
+#include <algorithm>
+#include <utility>
 
 #include <qbytearray.h>
 #include <qcoreapplication.h>
@@ -53,6 +55,8 @@ constexpr UINT ACCESSOR_MESSAGE = WM_APP + 0x100;
 constexpr const wchar_t* LISTENER_CLASS = L"QuickshellVirtualDesktops";
 
 constexpr qsizetype MAX_DESKTOPS = 20;
+constexpr int CREATION_POLL_MS = 25;
+constexpr int CREATION_POLLS = 40;
 constexpr int CLOAK_REFRESH_DELAY_MS = 250;
 
 bool readBinary(HKEY key, const wchar_t* name, QByteArray& out) {
@@ -189,6 +193,9 @@ VirtualDesktops::VirtualDesktops() {
 	this->cloakTimer.setSingleShot(true);
 	this->cloakTimer.setInterval(CLOAK_REFRESH_DELAY_MS);
 	QObject::connect(&this->cloakTimer, &QTimer::timeout, this, [this]() { this->refresh(); });
+
+	this->creationTimer.setInterval(CREATION_POLL_MS);
+	QObject::connect(&this->creationTimer, &QTimer::timeout, this, &VirtualDesktops::pollCreation);
 
 	startup::afterFirstFrame(this, [this]() {
 		this->loadAccessor();
@@ -578,41 +585,67 @@ bool VirtualDesktops::switchTo(qsizetype index) {
 	return true;
 }
 
-bool VirtualDesktops::waitForCount(qsizetype count) {
-	for (auto i = 0; i < 40; i++) {
-		this->refresh();
-		if (this->count() >= count) return true;
-		QThread::msleep(25);
-	}
-
-	return this->count() >= count;
-}
-
-bool VirtualDesktops::ensureCount(qsizetype count) {
+void VirtualDesktops::ensureCount(qsizetype count, std::function<void(bool)> done) {
 	if (count > MAX_DESKTOPS) {
 		qCWarning(logDesktops) << "Refusing to create more than" << MAX_DESKTOPS << "desktops";
-		return false;
+		done(false);
+		return;
 	}
 
-	while (this->count() < count) {
-		auto before = this->count();
-
-		if (this->accessor.loaded && this->accessor.createDesktop != nullptr) {
-			if (this->call(-1, this->accessor.createDesktop) == -1) {
-				qCWarning(logDesktops) << "CreateDesktop failed";
-				return false;
-			}
-		} else {
-			this->sendShortcut('D', 1);
-		}
-
-		if (!this->waitForCount(before + 1)) {
-			qCWarning(logDesktops) << "Desktop creation did not show up in the registry";
-			return false;
-		}
+	if (this->count() >= count) {
+		done(true);
+		return;
 	}
 
-	return true;
+	this->creationWaiters.append({count, std::move(done)});
+	auto idle = this->creationTarget == 0;
+	this->creationTarget = std::max(this->creationTarget, count);
+	if (idle) this->createNext();
+}
+
+void VirtualDesktops::createNext() {
+	if (this->count() >= this->creationTarget) {
+		this->finishCreation();
+		return;
+	}
+
+	this->creationBefore = this->count();
+	this->creationPolls = 0;
+
+	if (this->accessor.loaded && this->accessor.createDesktop != nullptr) {
+		if (this->call(-1, this->accessor.createDesktop) == -1) {
+			qCWarning(logDesktops) << "CreateDesktop failed";
+			this->finishCreation();
+			return;
+		}
+	} else {
+		this->sendShortcut('D', 1);
+	}
+
+	this->creationTimer.start();
+}
+
+void VirtualDesktops::pollCreation() {
+	this->refresh();
+
+	if (this->count() > this->creationBefore) {
+		this->creationTimer.stop();
+		this->createNext();
+		return;
+	}
+
+	if (++this->creationPolls >= CREATION_POLLS) {
+		this->creationTimer.stop();
+		qCWarning(logDesktops) << "Desktop creation did not show up in the registry";
+		this->finishCreation();
+	}
+}
+
+void VirtualDesktops::finishCreation() {
+	auto waiters = std::exchange(this->creationWaiters, {});
+	this->creationTarget = 0;
+
+	for (auto& [count, done]: waiters) done(this->count() >= count);
 }
 
 bool VirtualDesktops::removeDesktop(qsizetype index, qsizetype fallback) {

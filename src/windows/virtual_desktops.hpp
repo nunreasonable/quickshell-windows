@@ -1,6 +1,7 @@
 #pragma once
 
 #include <qt_windows.h>
+#include <functional>
 
 #include <qlist.h>
 #include <qobject.h>
@@ -58,7 +59,7 @@ public:
 	[[nodiscard]] bool isWindowOnCurrent(HWND hwnd) const;
 
 	bool switchTo(qsizetype index);
-	bool ensureCount(qsizetype count);
+	void ensureCount(qsizetype count, std::function<void(bool)> done);
 	bool removeDesktop(qsizetype index, qsizetype fallback);
 	bool moveWindow(HWND hwnd, qsizetype index);
 	bool pinWindow(HWND hwnd, bool pinned);
@@ -84,7 +85,9 @@ private:
 	void installListener();
 	bool readRegistry(QList<GUID>& ids, GUID& current) const;
 	[[nodiscard]] QString readDesktopName(const GUID& id) const;
-	bool waitForCount(qsizetype count);
+	void createNext();
+	void pollCreation();
+	void finishCreation();
 	void sendShortcut(WORD key, int times) const;
 
 	template <typename R, typename... P, typename... A>
@@ -103,6 +106,11 @@ private:
 	RegistryWatcher* watcher = nullptr;
 	HWND listener = nullptr;
 	QTimer cloakTimer;
+	QTimer creationTimer;
+	qsizetype creationTarget = 0;
+	qsizetype creationBefore = 0;
+	int creationPolls = 0;
+	QList<QPair<qsizetype, std::function<void(bool)>>> creationWaiters;
 
 	mutable ULONGLONG accessorRestartedAt = 0;
 

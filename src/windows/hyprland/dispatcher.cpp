@@ -8,6 +8,7 @@
 #include <qlist.h>
 #include <qlogging.h>
 #include <qloggingcategory.h>
+#include <qpointer.h>
 #include <qpoint.h>
 #include <qregularexpression.h>
 #include <qscreen.h>
@@ -17,6 +18,7 @@
 
 #include "../keyboard_hook.hpp"
 #include "../tiling.hpp"
+#include "../util.hpp"
 #include "../virtual_desktops.hpp"
 #include "../window_manager.hpp"
 #include "../window_tracker.hpp"
@@ -60,6 +62,72 @@ WORD arrowKey(const QString& direction) {
 	if (direction.startsWith('u')) return VK_UP;
 	if (direction.startsWith('d')) return VK_DOWN;
 	return 0;
+}
+
+void launchCommandLine(const QString& line) {
+	auto commandLine = line.toStdWString();
+	auto home = QDir::toNativeSeparators(QDir::homePath()).toStdWString();
+
+	STARTUPINFOW startup {};
+	startup.cb = sizeof(startup);
+	PROCESS_INFORMATION process {};
+
+	auto ok = CreateProcessW(
+	    nullptr,
+	    commandLine.data(),
+	    nullptr,
+	    nullptr,
+	    FALSE,
+	    CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT,
+	    nullptr,
+	    home.c_str(),
+	    &startup,
+	    &process
+	);
+
+	if (ok) {
+		CloseHandle(process.hProcess);
+		CloseHandle(process.hThread);
+		return;
+	}
+
+	QString file;
+	QString params;
+
+	if (line.startsWith('"')) {
+		auto end = line.indexOf('"', 1);
+		file = line.mid(1, end - 1);
+		if (end != -1) params = line.mid(end + 1).trimmed();
+	} else {
+		auto space = line.indexOf(' ');
+		file = space == -1 ? line : line.left(space);
+		if (space != -1) params = line.mid(space + 1).trimmed();
+	}
+
+	auto wfile = file.toStdWString();
+	auto wparams = params.toStdWString();
+
+	auto result = ShellExecuteW(
+	    nullptr,
+	    L"open",
+	    wfile.c_str(),
+	    params.isEmpty() ? nullptr : wparams.c_str(),
+	    home.c_str(),
+	    SW_SHOWNORMAL
+	);
+
+	if (reinterpret_cast<INT_PTR>(result) <= 32) {
+		qCWarning(logDispatch) << "exec failed for" << line << "error"
+		                       << reinterpret_cast<INT_PTR>(result);
+	}
+}
+
+void moveWindowTo(TrackedWindow* window, qsizetype index, bool follow) {
+	if (!window->moveToDesktop(index)) return;
+	if (!follow) return;
+
+	WorkspaceBehavior::instance()->prepareWarp(index, true);
+	window->activate();
 }
 
 } // namespace
@@ -410,7 +478,17 @@ void Dispatcher::focusWorkspace(const QString& arg) {
 		index = previous;
 	}
 
-	if (index >= desktops->count() && (!create || !desktops->ensureCount(index + 1))) return;
+	if (index >= desktops->count()) {
+		if (!create) return;
+
+		desktops->ensureCount(index + 1, [desktops, index](bool ok) {
+			if (!ok) return;
+			WorkspaceBehavior::instance()->prepareWarp(index);
+			desktops->switchTo(index);
+		});
+
+		return;
+	}
 
 	behavior->prepareWarp(index);
 	desktops->switchTo(index);
@@ -428,13 +506,17 @@ void Dispatcher::moveToWorkspace(TrackedWindow* window, const QString& arg, bool
 	}
 
 	auto* desktops = this->ipc->desktops();
-	if (index >= desktops->count() && (!create || !desktops->ensureCount(index + 1))) return;
+	if (index >= desktops->count()) {
+		if (!create) return;
 
-	if (!window->moveToDesktop(index)) return;
-	if (!follow) return;
+		desktops->ensureCount(index + 1, [window = QPointer(window), index, follow](bool ok) {
+			if (ok && window) moveWindowTo(window, index, follow);
+		});
 
-	WorkspaceBehavior::instance()->prepareWarp(index, true);
-	window->activate();
+		return;
+	}
+
+	moveWindowTo(window, index, follow);
 }
 
 void Dispatcher::fullscreen(TrackedWindow* window, int mode) {
@@ -681,61 +763,7 @@ void Dispatcher::exec(const QString& command) {
 		line.replace("%focused_window%", QString::number(active == nullptr ? 0 : active->pid()));
 	}
 
-	auto commandLine = line.toStdWString();
-	auto home = QDir::toNativeSeparators(QDir::homePath()).toStdWString();
-
-	STARTUPINFOW startup {};
-	startup.cb = sizeof(startup);
-	PROCESS_INFORMATION process {};
-
-	auto ok = CreateProcessW(
-	    nullptr,
-	    commandLine.data(),
-	    nullptr,
-	    nullptr,
-	    FALSE,
-	    CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT,
-	    nullptr,
-	    home.c_str(),
-	    &startup,
-	    &process
-	);
-
-	if (ok) {
-		CloseHandle(process.hProcess);
-		CloseHandle(process.hThread);
-		return;
-	}
-
-	QString file;
-	QString params;
-
-	if (line.startsWith('"')) {
-		auto end = line.indexOf('"', 1);
-		file = line.mid(1, end - 1);
-		if (end != -1) params = line.mid(end + 1).trimmed();
-	} else {
-		auto space = line.indexOf(' ');
-		file = space == -1 ? line : line.left(space);
-		if (space != -1) params = line.mid(space + 1).trimmed();
-	}
-
-	auto wfile = file.toStdWString();
-	auto wparams = params.toStdWString();
-
-	auto result = ShellExecuteW(
-	    nullptr,
-	    L"open",
-	    wfile.c_str(),
-	    params.isEmpty() ? nullptr : wparams.c_str(),
-	    home.c_str(),
-	    SW_SHOWNORMAL
-	);
-
-	if (reinterpret_cast<INT_PTR>(result) <= 32) {
-		qCWarning(logDispatch) << "exec failed for" << line << "error"
-		                       << reinterpret_cast<INT_PTR>(result);
-	}
+	qs::windows::runLauncher([line]() { launchCommandLine(line); });
 }
 
 void Dispatcher::unknown(const QString& what) {
