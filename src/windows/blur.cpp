@@ -9,6 +9,7 @@
 #include <qt_windows.h>
 
 #include <qcoreapplication.h>
+#include <qdir.h>
 #include <qfile.h>
 #include <qfileinfo.h>
 #include <qjsonarray.h>
@@ -1166,7 +1167,8 @@ void BlurManager::armRegistryNotification() {
 }
 
 void BlurManager::setShellDir(const QString& shellDir) {
-	if (shellDir.isEmpty() || (this->loaded && shellDir == this->shellDir)) return;
+	if (shellDir.isEmpty() || QDir::isRelativePath(shellDir)) return;
+	if (this->loaded && shellDir == this->shellDir) return;
 
 	this->shellDir = shellDir;
 	this->loaded = true;

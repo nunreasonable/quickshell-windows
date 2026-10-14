@@ -461,6 +461,7 @@ HotkeyManager::~HotkeyManager() {
 }
 
 void HotkeyManager::setShellDir(const QString& shellDir) {
+	if (shellDir.isEmpty() || QDir::isRelativePath(shellDir)) return;
 	if (this->loaded && shellDir == this->shellDir) return;
 
 	this->shellDir = shellDir;
