@@ -222,6 +222,12 @@ bool covers(const RECT& rect, const QRect& area) {
 	    && rect.right >= area.left() + area.width() && rect.bottom >= area.top() + area.height();
 }
 
+bool isShown(HWND hwnd) {
+	DWORD cloaked = 0;
+	return SUCCEEDED(DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked)))
+	    && cloaked == 0;
+}
+
 } // namespace
 
 TrackedWindow::TrackedWindow(WindowTracker* tracker, HWND hwnd)
@@ -332,11 +338,7 @@ void TrackedWindow::refreshState() {
 
 void TrackedWindow::refreshDesktop(bool askShell) {
 	auto* desktops = this->tracker->desktops();
-
-	DWORD cloaked = 0;
-	auto shown =
-	    SUCCEEDED(DwmGetWindowAttribute(this->mHwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked)))
-	    && cloaked == 0;
+	auto shown = isShown(this->mHwnd);
 
 	if (shown && !askShell && desktops->currentIndex() >= 0) {
 		this->bDesktop = static_cast<qint32>(desktops->currentIndex());
@@ -389,6 +391,7 @@ void TrackedWindow::setFullscreen(bool fullscreen) {
 
 void TrackedWindow::fullscreenOn(QScreen* screen) {
 	auto& backup = this->fullscreenBackup;
+	if (IsHungAppWindow(this->mHwnd)) return;
 
 	if (screen == nullptr) {
 		if (!backup.active) {
@@ -407,7 +410,7 @@ void TrackedWindow::fullscreenOn(QScreen* screen) {
 		    backup.rect.top,
 		    backup.rect.right - backup.rect.left,
 		    backup.rect.bottom - backup.rect.top,
-		    SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE
+		    SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS
 		);
 
 		backup.active = false;
@@ -423,7 +426,7 @@ void TrackedWindow::fullscreenOn(QScreen* screen) {
 		backup.active = true;
 	}
 
-	if (IsZoomed(this->mHwnd)) ShowWindow(this->mHwnd, SW_RESTORE);
+	if (IsZoomed(this->mHwnd)) ShowWindowAsync(this->mHwnd, SW_RESTORE);
 
 	SetWindowLongPtrW(this->mHwnd, GWL_STYLE, backup.style & ~(WS_CAPTION | WS_THICKFRAME));
 	SetWindowPos(
@@ -433,7 +436,7 @@ void TrackedWindow::fullscreenOn(QScreen* screen) {
 	    rects.monitor.top(),
 	    rects.monitor.width(),
 	    rects.monitor.height(),
-	    SWP_FRAMECHANGED | SWP_NOOWNERZORDER
+	    SWP_FRAMECHANGED | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS
 	);
 }
 
@@ -510,6 +513,10 @@ WindowTracker::WindowTracker() {
 	);
 
 	QObject::connect(this->mDesktops, &VirtualDesktops::currentChanged, this, [this]() {
+		for (auto* window: this->mWindows) {
+			if (isShown(window->hwnd())) window->refreshDesktop(false);
+		}
+
 		this->foregroundDirty = true;
 		this->schedule();
 	});
@@ -608,7 +615,7 @@ void WindowTracker::onEvent(DWORD event, HWND hwnd, DWORD time) {
 			auto& d = this->dirty[hwnd];
 			d.eligibility = true;
 			d.desktop = true;
-			d.askShell = true;
+			if (event == EVENT_OBJECT_CLOAKED) d.askShell = true;
 			d.state = true;
 		} else {
 			this->candidates.insert(hwnd);

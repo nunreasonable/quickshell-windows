@@ -134,6 +134,7 @@ bool forceForegroundWindow(HWND hwnd) {
 	auto ownThread = GetCurrentThreadId();
 
 	if (foregroundThread == 0 || foregroundThread == ownThread) return false;
+	if (IsHungAppWindow(foreground)) return false;
 
 	if (!AttachThreadInput(ownThread, foregroundThread, TRUE)) return false;
 	auto ok = SetForegroundWindow(hwnd) != FALSE;
