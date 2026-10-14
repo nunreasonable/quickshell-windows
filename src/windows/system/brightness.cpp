@@ -22,7 +22,6 @@
 #include <qscreen.h>
 #include <qthreadpool.h>
 
-#include "../../core/backgroundpool.hpp"
 #include "../../core/logcat.hpp"
 #include "../startup.hpp"
 #include "../util.hpp"
@@ -32,6 +31,8 @@ namespace qs::windows::sys {
 
 namespace {
 QS_LOGGING_CATEGORY(logBrightness, "quickshell.windows.brightness", QtWarningMsg);
+
+constexpr int POOL_STOP_TIMEOUT_MS = 2000;
 
 bool ddcQuery(HMONITOR hMonitor, qreal& outBrightness) {
 	if (hMonitor == nullptr) return false;
@@ -437,6 +438,20 @@ QScreen* screenNamed(const QString& screenName) {
 
 } // namespace
 
+Brightness::Brightness(QObject* parent): QObject(parent), pool(new QThreadPool()) {
+	this->pool->setMaxThreadCount(1);
+}
+
+Brightness::~Brightness() {
+	this->pool->clear();
+	if (!this->pool->waitForDone(POOL_STOP_TIMEOUT_MS)) {
+		qCWarning(logBrightness) << "A brightness call didn't finish in time";
+		return;
+	}
+
+	delete this->pool;
+}
+
 void Brightness::query(const QString& screenName) {
 	if (!startup::settled()) {
 		startup::afterFirstFrame(this, [this, screenName]() { this->query(screenName); });
@@ -493,7 +508,7 @@ void Brightness::query(const QString& screenName) {
 		);
 	});
 
-	BackgroundThreadPool::instance()->start(task);
+	this->pool->start(task);
 }
 
 void Brightness::probe(const QString& screenName) {
@@ -537,7 +552,7 @@ void Brightness::probe(const QString& screenName) {
 		);
 	});
 
-	BackgroundThreadPool::instance()->start(task);
+	this->pool->start(task);
 }
 
 void Brightness::setBrightness(const QString& screenName, bool isDdc, qreal value) {
@@ -581,7 +596,7 @@ void Brightness::setBrightness(const QString& screenName, bool isDdc, qreal valu
 		);
 	});
 
-	BackgroundThreadPool::instance()->start(task);
+	this->pool->start(task);
 }
 
 } // namespace qs::windows::sys

@@ -4,8 +4,11 @@
 #include <qobject.h>
 #include <qqmlintegration.h>
 #include <qstring.h>
+#include <qtclasshelpermacros.h>
 #include <qtmetamacros.h>
 #include <qtypes.h>
+
+class QThreadPool;
 
 namespace qs::windows::sys {
 
@@ -15,7 +18,9 @@ class Brightness: public QObject {
 	QML_SINGLETON;
 
 public:
-	explicit Brightness(QObject* parent = nullptr): QObject(parent) {}
+	explicit Brightness(QObject* parent = nullptr);
+	~Brightness() override;
+	Q_DISABLE_COPY_MOVE(Brightness);
 
 	Q_INVOKABLE void query(const QString& screenName);
 
@@ -28,6 +33,7 @@ signals:
 	void brightnessSetFinished(const QString& screenName, bool ok);
 
 private:
+	QThreadPool* pool = nullptr;
 	QHash<QString, int> screenRoute;
 	int nextWmiInstanceIndex = 0;
 	QHash<QString, bool> software;
