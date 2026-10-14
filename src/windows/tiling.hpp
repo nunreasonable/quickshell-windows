@@ -147,6 +147,7 @@ private:
 		qint32 corrections = 0;
 		qint64 lastCorrection = 0;
 		bool verifying = false;
+		bool wasHung = false;
 		qint64 deadline = 0;
 		bool parked = false;
 		QRect preTiling;

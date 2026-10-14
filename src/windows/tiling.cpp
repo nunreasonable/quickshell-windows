@@ -38,6 +38,7 @@ using tiling::Edge;
 constexpr int SYNC_DELAY_MS = 30;
 constexpr int VERIFY_DELAY_MS = 150;
 constexpr int DEADLINE_MS = 2000;
+constexpr int HUNG_RETRY_MS = 500;
 constexpr qint32 MAX_CORRECTIONS = 2;
 constexpr qint64 CORRECTION_RESET_MS = 1500;
 constexpr int EDGE_TOLERANCE = 2;
@@ -698,6 +699,7 @@ void TilingManager::syncWindow(TrackedWindow* window) {
 	if (window == this->dragging) return;
 
 	auto state = this->stateOf(m);
+	if (state != State::Tiled) m.verifying = false;
 
 	if (state == State::Out) {
 		if (m.layout == nullptr) return;
@@ -884,6 +886,7 @@ void TilingManager::place(Managed& m, const QRect& tile) {
 void TilingManager::send(Managed& m, const QRect& frame) {
 	m.before = frame;
 	m.verifying = true;
+	m.wasHung = false;
 	m.deadline = QDateTime::currentMSecsSinceEpoch() + DEADLINE_MS;
 	setFrame(m.window->hwnd(), m.target);
 	this->armDeadline();
@@ -892,7 +895,14 @@ void TilingManager::send(Managed& m, const QRect& frame) {
 void TilingManager::armDeadline() {
 	auto next = std::numeric_limits<qint64>::max();
 	for (auto& [window, m]: this->managed) {
-		if (m.verifying) next = qMin(next, m.deadline);
+		if (!m.verifying) continue;
+		if (m.layout == nullptr || m.target.isNull() || window == this->dragging
+		    || this->stateOf(m) != State::Tiled)
+		{
+			m.verifying = false;
+			continue;
+		}
+		next = qMin(next, m.deadline);
 	}
 
 	if (next == std::numeric_limits<qint64>::max()) {
@@ -1019,7 +1029,11 @@ void TilingManager::onDeadline() {
 	auto now = QDateTime::currentMSecsSinceEpoch();
 
 	for (auto& [window, m]: this->managed) {
-		if (!m.verifying || m.layout == nullptr || m.target.isNull() || window == this->dragging) {
+		if (!m.verifying) continue;
+		if (m.layout == nullptr || m.target.isNull() || window == this->dragging
+		    || this->stateOf(m) != State::Tiled)
+		{
+			m.verifying = false;
 			continue;
 		}
 		if (now < m.deadline) continue;
@@ -1032,13 +1046,19 @@ void TilingManager::onDeadline() {
 			continue;
 		}
 
-		if (frame != m.before) {
+		if (IsHungAppWindow(hwnd)) {
+			m.wasHung = true;
+			m.deadline = now + HUNG_RETRY_MS;
+			continue;
+		}
+
+		if (frame != m.before || m.wasHung) {
+			m.verifying = false;
+			m.wasHung = false;
 			this->unverified.insert(window);
 			if (!this->verifyTimer.isActive()) this->verifyTimer.start();
 			continue;
 		}
-
-		if (IsHungAppWindow(hwnd)) continue;
 
 		qCInfo(logTiling) << "Window" << window->addressHex() << window->appId()
 		                  << "ignores being moved; it floats.";
