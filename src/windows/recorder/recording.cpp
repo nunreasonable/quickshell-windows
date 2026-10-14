@@ -15,6 +15,8 @@
 #include <qcoreapplication.h>
 #include <qdeadlinetimer.h>
 #include <qdir.h>
+#include <qfile.h>
+#include <qfileinfo.h>
 #include <qlogging.h>
 #include <qloggingcategory.h>
 #include <qobject.h>
@@ -426,7 +428,24 @@ bool RecorderController::start(const RecordingRequest& request, QString* error) 
 		return false;
 	}
 
-	auto job = std::make_shared<RecordingJob>(request);
+	auto reserved = request;
+	auto info = QFileInfo(request.path);
+	for (quint64 suffix = 0;; ++suffix) {
+		auto name = suffix == 0 ? info.fileName()
+		                        : QString("%1_%2.%3").arg(info.completeBaseName()).arg(suffix).arg(info.suffix());
+		auto path = info.dir().absoluteFilePath(name);
+		QFile file(path);
+		if (file.open(QIODevice::WriteOnly | QIODevice::NewOnly)) {
+			reserved.path = path;
+			break;
+		}
+		if (!QFileInfo::exists(path)) {
+			*error = file.errorString();
+			return false;
+		}
+	}
+
+	auto job = std::make_shared<RecordingJob>(std::move(reserved));
 	auto* thread = QThread::create([job] { job->run(); });
 	thread->setObjectName("quickshell-recorder");
 	QObject::connect(thread, &QThread::finished, thread, &QObject::deleteLater);
