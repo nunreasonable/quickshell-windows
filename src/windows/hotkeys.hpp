@@ -104,6 +104,10 @@ private:
 	void parse(const QByteArray& data, const QString& path);
 	void unregisterAll();
 	void registerAll();
+	qsizetype addToTrigger(qsizetype index);
+	void resetTrigger(qsizetype index);
+	void registerTriggers();
+	void relayout();
 	void mergeDefaults();
 	void updateWatches();
 	void scheduleReload();

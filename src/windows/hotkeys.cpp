@@ -63,6 +63,12 @@ QChar punctuationChar(const QString& name) {
 	return chars.value(name.toLower());
 }
 
+bool dependsOnLayout(const QString& keys) {
+	return std::ranges::any_of(keys.split('+'), [](const QString& part) {
+		return !punctuationChar(part.trimmed()).isNull();
+	});
+}
+
 uint8_t layoutVkForChar(QChar ch, HKL layout, bool& needsShift) {
 	needsShift = false;
 
@@ -198,6 +204,21 @@ bool tryStartDetached(const QString& command) {
 
 	qCDebug(logHotkeys) << "Could not start" << command << ":" << process.errorString();
 	return false;
+}
+
+void parseGlobalName(const QJsonObject& object, Bind& bind) {
+	bind.name = object.value("name").toString();
+	bind.appid = object.value("appid").toString("quickshell");
+
+	if (auto colon = bind.name.indexOf(':'); colon != -1) {
+		bind.appid = bind.name.left(colon);
+		bind.name = bind.name.mid(colon + 1);
+	}
+}
+
+HookTrigger::Kind triggerKind(const Bind& bind) {
+	if (bind.combo.lone == 0) return HookTrigger::Combo;
+	return bind.onRelease ? HookTrigger::Tap : HookTrigger::Hold;
 }
 
 bool parseMouseKeys(const QString& text, KeyCombo& combo) {
@@ -439,7 +460,7 @@ HotkeyManager::HotkeyManager(QObject* parent): QObject(parent) {
 		auto* layout = layouts->current();
 		if (layout == this->lastLayout) return;
 		this->lastLayout = layout;
-		if (this->loaded) this->reload();
+		if (this->loaded) this->relayout();
 	});
 
 	this->releaseTimer.setInterval(RELEASE_POLL_MS);
@@ -550,8 +571,8 @@ void HotkeyManager::mergeDefaults() {
 
 		auto taken = std::ranges::any_of(userBinds, [&](const Bind& existing) {
 			return existing.combo == bind.combo
-			    || (existing.action == Bind::Action::Global && existing.name == bind.name
-			        && existing.appid == bind.appid);
+			    || ((existing.action == Bind::Action::Global || existing.action == Bind::Action::Native)
+			        && existing.name == bind.name && existing.appid == bind.appid);
 		});
 
 		if (!taken) {
@@ -621,13 +642,7 @@ void HotkeyManager::parse(const QByteArray& data, const QString& path) {
 
 		if (action == "global") {
 			bind.action = Bind::Action::Global;
-			bind.name = object.value("name").toString();
-			bind.appid = object.value("appid").toString("quickshell");
-
-			if (auto colon = bind.name.indexOf(':'); colon != -1) {
-				bind.appid = bind.name.left(colon);
-				bind.name = bind.name.mid(colon + 1);
-			}
+			parseGlobalName(object, bind);
 
 			if (bind.name.isEmpty()) {
 				qCWarning(logHotkeys).noquote() << where << ": global bind without a name";
@@ -665,6 +680,9 @@ void HotkeyManager::parse(const QByteArray& data, const QString& path) {
 		} else if (action == "native") {
 			bind.action = Bind::Action::Native;
 			bind.mechanism = Bind::Mechanism::Native;
+
+			auto disabled = object.value("disabled").toObject();
+			if (disabled.value("action").toString() == "global") parseGlobalName(disabled, bind);
 		} else {
 			qCWarning(logHotkeys).noquote() << where << ": unknown action" << action;
 			continue;
@@ -699,41 +717,100 @@ void HotkeyManager::unregisterAll() {
 	KeyboardHook::setSnapshot(nullptr);
 }
 
+qsizetype HotkeyManager::addToTrigger(qsizetype index) {
+	const auto& bind = this->binds.at(index);
+	auto kind = triggerKind(bind);
+
+	for (auto i = 0; i < this->triggers.size(); i++) {
+		auto& trigger = this->triggers[i];
+		if (trigger.kind != kind || trigger.combo != bind.combo) continue;
+
+		trigger.binds.append(index);
+		trigger.repeat |= bind.repeat;
+		return i;
+	}
+
+	this->triggers.append(Trigger {
+	    .kind = kind,
+	    .combo = bind.combo,
+	    .binds = {index},
+	    .repeat = bind.repeat,
+	});
+
+	return this->triggers.size() - 1;
+}
+
 void HotkeyManager::registerAll() {
 	if (this->messageWindow == nullptr) return;
 
 	for (auto i = 0; i < this->binds.size(); i++) {
+		if (this->binds.at(i).action != Bind::Action::Native) this->addToTrigger(i);
+	}
+
+	this->registerTriggers();
+}
+
+void HotkeyManager::resetTrigger(qsizetype index) {
+	auto& trigger = this->triggers[index];
+
+	if (trigger.mechanism == Bind::Mechanism::Hotkey) {
+		UnregisterHotKey(this->messageWindow, static_cast<int>(index + 1));
+	}
+
+	trigger.mechanism = Bind::Mechanism::None;
+	if (trigger.binds.isEmpty()) trigger.down = false;
+	trigger.repeat = std::ranges::any_of(trigger.binds, [this](qsizetype bind) {
+		return this->binds.at(bind).repeat;
+	});
+}
+
+void HotkeyManager::relayout() {
+	auto moved = QList<qsizetype>();
+
+	for (auto i = 0; i < this->binds.size(); i++) {
 		auto& bind = this->binds[i];
-		if (bind.action == Bind::Action::Native) continue;
+		if (!dependsOnLayout(bind.keys)) continue;
 
-		auto kind = HookTrigger::Combo;
-		if (bind.combo.lone != 0) kind = bind.onRelease ? HookTrigger::Tap : HookTrigger::Hold;
+		auto combo = KeyCombo();
+		auto error = QString();
+		if (!parseKeys(bind.keys, combo, error) || combo == bind.combo) continue;
 
-		auto found = false;
-		for (auto& trigger: this->triggers) {
-			if (trigger.kind == kind && trigger.combo == bind.combo) {
-				trigger.binds.append(i);
-				trigger.repeat |= bind.repeat;
-				found = true;
-				break;
-			}
+		bind.combo = combo;
+		if (bind.action != Bind::Action::Native) moved.append(i);
+	}
+
+	if (moved.isEmpty() || this->messageWindow == nullptr) return;
+
+	auto released = QList<QPair<QString, QString>>();
+
+	for (auto index: moved) {
+		const auto& bind = this->binds.at(index);
+		auto key = qMakePair(bind.appid, bind.name);
+		if (bind.action == Bind::Action::Global && this->pressedGlobals.contains(key)) {
+			released.append(key);
 		}
 
-		if (!found) {
-			this->triggers.append(Trigger {
-			    .kind = kind,
-			    .combo = bind.combo,
-			    .binds = {i},
-			    .repeat = bind.repeat,
-			});
+		for (auto i = 0; i < this->triggers.size(); i++) {
+			if (this->triggers[i].binds.removeAll(index) != 0) this->resetTrigger(i);
 		}
 	}
 
+	for (auto index: moved) this->resetTrigger(this->addToTrigger(index));
+
+	this->registerTriggers();
+
+	for (const auto& [appid, name]: released) this->emitGlobal(appid, name, false);
+	emit this->bindsChanged();
+}
+
+void HotkeyManager::registerTriggers() {
 	auto snapshot = std::make_shared<HookSnapshot>();
 	snapshot->serial = this->serial;
 
 	for (auto i = 0; i < this->triggers.size(); i++) {
 		auto& trigger = this->triggers[i];
+		if (trigger.binds.isEmpty() || trigger.mechanism == Bind::Mechanism::Hotkey) continue;
+
 		auto useHook = trigger.kind != HookTrigger::Combo || (trigger.combo.mods & ModSuper) != 0;
 
 		if (!useHook) {
