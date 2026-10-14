@@ -223,6 +223,90 @@ HookTrigger::Kind triggerKind(const Bind& bind) {
 	return bind.onRelease ? HookTrigger::Tap : HookTrigger::Hold;
 }
 
+QString bindBaseId(const QJsonObject& object) {
+	auto action = object.value("action").toString();
+
+	if (action == "global") {
+		auto name = object.value("name").toString();
+		auto appid = object.value("appid").toString("quickshell");
+		if (auto colon = name.indexOf(':'); colon != -1) {
+			appid = name.left(colon);
+			name = name.mid(colon + 1);
+		}
+		return "global:" + appid + ":" + name;
+	}
+
+	if (action == "dispatch") return "dispatch:" + object.value("dispatch").toString();
+	if (action == "exec") return "exec:" + object.value("command").toString();
+	if (action == "key") return "key:" + object.value("key").toString();
+	if (action == "native") return "native:" + object.value("keys").toString();
+	if (action == "ipc") {
+		return "ipc:" + object.value("target").toString() + ":" + object.value("function").toString();
+	}
+
+	return action;
+}
+
+QStringList defaultBindIds(const QJsonArray& binds) {
+	auto counts = QHash<QString, int>();
+	auto ids = QStringList();
+
+	for (const auto& entry: binds) {
+		auto id = bindBaseId(entry.toObject());
+		counts[id]++;
+		ids.append(id);
+	}
+
+	for (auto i = 0; i < ids.size(); i++) {
+		if (counts.value(ids.at(i)) > 1) ids[i] += "@" + binds.at(i).toObject().value("keys").toString();
+	}
+
+	return ids;
+}
+
+QByteArray extendDefaults(const QJsonObject& user, const QByteArray& defaults) {
+	auto defaultBinds = QJsonDocument::fromJson(defaults).object().value("binds").toArray();
+	auto ids = defaultBindIds(defaultBinds);
+
+	auto overrides = QHash<QString, QJsonObject>();
+	auto added = QJsonArray();
+
+	for (const auto& entry: user.value("binds").toArray()) {
+		auto object = entry.toObject();
+		auto base = object.value("base").toString();
+		if (base.isEmpty()) added.append(object);
+		else overrides.insert(base, object);
+	}
+
+	auto merged = QJsonArray();
+
+	for (auto i = 0; i < defaultBinds.size(); i++) {
+		auto object = defaultBinds.at(i).toObject();
+		auto override = overrides.take(ids.at(i));
+
+		auto keys = override.value("keys").toString();
+		if (!keys.isEmpty()) object.insert("keys", keys);
+
+		if (override.value("disabled").toBool()) {
+			object = QJsonObject {
+			    {"keys", object.value("keys")},
+			    {"action", "native"},
+			    {"disabled", object},
+			};
+		}
+
+		merged.append(object);
+	}
+
+	for (const auto& base: overrides.keys()) {
+		qCDebug(logHotkeys) << "Ignoring a change to" << base << "which is no longer a default bind";
+	}
+
+	for (const auto& entry: added) merged.append(entry);
+
+	return QJsonDocument(QJsonObject {{"binds", merged}}).toJson(QJsonDocument::Compact);
+}
+
 bool parseMouseKeys(const QString& text, KeyCombo& combo) {
 	combo = KeyCombo();
 	auto buttons = 0;
@@ -528,6 +612,18 @@ void HotkeyManager::loadFile() {
 	if (path.isEmpty() || !file.open(QFile::ReadOnly)) path.clear();
 	else data = file.readAll();
 
+	auto extends = false;
+	if (!path.isEmpty() && path == this->userFilePath()) {
+		auto user = QJsonDocument::fromJson(data).object();
+		if (user.value("extends").toString() == "defaults") {
+			auto defaults = QFile(this->defaultFilePath());
+			if (defaults.open(QFile::ReadOnly)) {
+				data = extendDefaults(user, defaults.readAll());
+				extends = true;
+			}
+		}
+	}
+
 	if (!this->parsed || path != this->mConfigPath || data != this->loadedData) {
 		if (path.isEmpty()) {
 			auto looked = QStringList {this->userFilePath(), this->defaultFilePath()};
@@ -542,7 +638,7 @@ void HotkeyManager::loadFile() {
 
 		this->unregisterAll();
 		this->parse(data, path);
-		if (!path.isEmpty() && path == this->userFilePath()) this->mergeDefaults();
+		if (!extends && !path.isEmpty() && path == this->userFilePath()) this->mergeDefaults();
 		this->registerAll();
 		emit this->bindsChanged();
 	}
