@@ -1,6 +1,7 @@
 #pragma once
 
 #include <qt_windows.h>
+#include <functional>
 
 #include <qpoint.h>
 #include <qrect.h>
@@ -48,6 +49,7 @@ private:
 [[nodiscard]] RECT toRECT(const QRect& rect);
 
 bool forceForegroundWindow(HWND hwnd);
+void runLauncher(std::function<void()> task);
 
 DWORD windowsBuild();
 

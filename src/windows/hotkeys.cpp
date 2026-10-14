@@ -24,6 +24,7 @@
 #include <qqmlengine.h>
 #include <qstandardpaths.h>
 #include <qstring.h>
+#include <qstringlist.h>
 #include <qtimer.h>
 #include <qvariant.h>
 
@@ -33,6 +34,7 @@
 #include "../io/ipchandler.hpp"
 #include "keyboard_hook.hpp"
 #include "system/keyboard.hpp"
+#include "util.hpp"
 
 namespace qs::windows::hotkeys {
 
@@ -1087,9 +1089,9 @@ void HotkeyManager::runDispatch(const Bind& bind) {
 }
 
 void HotkeyManager::runExec(const Bind& bind) const {
-	auto alternatives = bind.argument.split(QStringLiteral(" || "));
+	auto commands = QStringList();
 
-	for (const auto& alternative: alternatives) {
+	for (const auto& alternative: bind.argument.split(QStringLiteral(" || "))) {
 		auto command = alternative;
 		command.replace("%SHELL%", this->shellDir, Qt::CaseInsensitive);
 
@@ -1101,10 +1103,16 @@ void HotkeyManager::runExec(const Bind& bind) const {
 			command = QString::fromWCharArray(buffer.c_str());
 		}
 
-		if (tryStartDetached(command)) return;
+		commands.append(command);
 	}
 
-	qCWarning(logHotkeys) << "Failed to start any alternative of" << bind.argument;
+	runLauncher([commands, argument = bind.argument]() {
+		for (const auto& command: commands) {
+			if (tryStartDetached(command)) return;
+		}
+
+		qCWarning(logHotkeys) << "Failed to start any alternative of" << argument;
+	});
 }
 
 void HotkeyManager::runIpc(const Bind& bind) {

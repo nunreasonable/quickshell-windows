@@ -10,10 +10,12 @@
 #include <qrect.h>
 #include <qscreen.h>
 #include <qscreen_platform.h>
+#include <qthreadpool.h>
 #include <qtypes.h>
 #include <qwindow.h>
 
 #include <dwmapi.h>
+#include <objbase.h>
 
 namespace qs::windows {
 
@@ -121,6 +123,21 @@ DWORD windowsBuild() {
 	}();
 
 	return build;
+}
+
+void runLauncher(std::function<void()> task) {
+	static auto* pool = [] {
+		auto* pool = new QThreadPool();
+		pool->setMaxThreadCount(2);
+		pool->setExpiryTimeout(30000);
+		return pool;
+	}();
+
+	pool->start([task = std::move(task)]() {
+		auto com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+		task();
+		if (SUCCEEDED(com)) CoUninitialize();
+	});
 }
 
 bool forceForegroundWindow(HWND hwnd) {
