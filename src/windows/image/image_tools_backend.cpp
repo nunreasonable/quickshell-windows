@@ -1,5 +1,8 @@
 #include "image_tools_backend.hpp"
+#include <memory>
 
+#include <qlogging.h>
+#include <qloggingcategory.h>
 #include <qmetaobject.h>
 #include <qobject.h>
 #include <qstring.h>
@@ -10,16 +13,27 @@
 
 namespace qs::windows::image {
 
-ImageToolsBackend::ImageToolsBackend(ImageTools* frontend) {
+namespace {
+Q_LOGGING_CATEGORY(logImageToolsBackend, "quickshell.windows.imagetools", QtWarningMsg);
+
+constexpr unsigned long STOP_TIMEOUT_MS = 3000;
+} // namespace
+
+ImageToolsBackend::ImageToolsBackend(ImageTools* frontend): mThread(std::make_unique<QThread>()) {
 	this->mWorker = new ImageToolsWorker(frontend);
-	this->mWorker->moveToThread(&this->mThread);
+	this->mWorker->moveToThread(this->mThread.get());
 }
 
 ImageToolsBackend::~ImageToolsBackend() {
-	if (this->mThread.isRunning()) {
-		this->mThread.quit();
-		this->mThread.wait();
+	if (this->mThread->isRunning()) {
+		this->mThread->quit();
+		if (!this->mThread->wait(STOP_TIMEOUT_MS)) {
+			qCWarning(logImageToolsBackend) << "Image tools worker didn't stop in time";
+			(void) this->mThread.release();
+			return;
+		}
 	}
+
 	delete this->mWorker;
 }
 
@@ -100,7 +114,7 @@ void ImageToolsBackend::ensureStarted() {
 	if (this->mStarted) return;
 
 	this->mStarted = true;
-	this->mThread.start(QThread::LowPriority);
+	this->mThread->start(QThread::LowPriority);
 }
 
 } // namespace qs::windows::image

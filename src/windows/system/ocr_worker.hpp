@@ -1,6 +1,7 @@
 #pragma once
 
 #include <qobject.h>
+#include <qpointer.h>
 #include <qstring.h>
 #include <qtclasshelpermacros.h>
 #include <qtmetamacros.h>
@@ -28,7 +29,7 @@ public slots:
 private:
 	[[nodiscard]] winrt::Windows::Media::Ocr::OcrEngine engine();
 
-	Ocr* mFrontend;
+	QPointer<Ocr> mFrontend;
 
 	bool mApartmentInitialized = false;
 	winrt::Windows::Media::Ocr::OcrEngine mEngine {nullptr};

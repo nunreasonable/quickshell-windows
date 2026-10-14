@@ -1,5 +1,8 @@
 #include "ocr_backend.hpp"
+#include <memory>
 
+#include <qlogging.h>
+#include <qloggingcategory.h>
 #include <qmetaobject.h>
 #include <qobject.h>
 #include <qstring.h>
@@ -10,26 +13,37 @@
 
 namespace qs::windows::sys {
 
-OcrBackend::OcrBackend(Ocr* frontend) {
-	this->mWorker = new OcrWorker(frontend);
-	this->mWorker->moveToThread(&this->mThread);
+namespace {
+Q_LOGGING_CATEGORY(logOcrBackend, "quickshell.windows.ocr", QtWarningMsg);
 
-	QObject::connect(&this->mThread, &QThread::started, this->mWorker, &OcrWorker::start);
-	QObject::connect(&this->mThread, &QThread::finished, this->mWorker, &OcrWorker::shutdown);
+constexpr unsigned long STOP_TIMEOUT_MS = 3000;
+} // namespace
+
+OcrBackend::OcrBackend(Ocr* frontend): mThread(std::make_unique<QThread>()) {
+	this->mWorker = new OcrWorker(frontend);
+	this->mWorker->moveToThread(this->mThread.get());
+
+	QObject::connect(this->mThread.get(), &QThread::started, this->mWorker, &OcrWorker::start);
+	QObject::connect(this->mThread.get(), &QThread::finished, this->mWorker, &OcrWorker::shutdown);
 }
 
 OcrBackend::~OcrBackend() {
-	if (this->mThread.isRunning()) {
-		this->mThread.quit();
-		this->mThread.wait();
+	if (this->mThread->isRunning()) {
+		this->mThread->quit();
+		if (!this->mThread->wait(STOP_TIMEOUT_MS)) {
+			qCWarning(logOcrBackend) << "OCR worker didn't stop in time";
+			(void) this->mThread.release();
+			return;
+		}
 	}
+
 	delete this->mWorker;
 }
 
 void OcrBackend::requestRecognize(int requestId, const QString& path) {
 	if (!this->mStarted) {
 		this->mStarted = true;
-		this->mThread.start();
+		this->mThread->start();
 	}
 
 	auto* worker = this->mWorker;

@@ -9,6 +9,7 @@
 #include <vector>
 
 #include <qcolor.h>
+#include <qcoreapplication.h>
 #include <qdir.h>
 #include <qfileinfo.h>
 #include <qlogging.h>
@@ -337,9 +338,9 @@ void OcrWorker::cmdRecognize(int requestId, const QString& path) {
 	}
 
 	QMetaObject::invokeMethod(
-	    this->mFrontend,
+	    QCoreApplication::instance(),
 	    [frontend = this->mFrontend, requestId, resultText, ok, error, lines] {
-		    frontend->backendDone(requestId, resultText, ok, error, lines);
+		    if (frontend) frontend->backendDone(requestId, resultText, ok, error, lines);
 	    },
 	    Qt::QueuedConnection
 	);

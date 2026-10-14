@@ -1,5 +1,6 @@
 #include "gsmtc_worker.hpp"
 
+#include <qcoreapplication.h>
 #include <qdatetime.h>
 #include <qhash.h>
 #include <qlogging.h>
@@ -238,8 +239,9 @@ void GsmtcWorker::addSession(const GlobalSystemMediaTransportControlsSession& se
 	}
 
 	QMetaObject::invokeMethod(
-	    this->mFrontend,
+	    QCoreApplication::instance(),
 	    [frontend = this->mFrontend, id, identity, desktopEntry, dbusName, playback, timeline, media] {
+		    if (!frontend) return;
 		    frontend->backendAddPlayer(id, identity, desktopEntry, dbusName, playback, timeline, media);
 	    },
 	    Qt::QueuedConnection
@@ -257,8 +259,10 @@ void GsmtcWorker::removeSession(quint64 sessionId) {
 	this->mEntries.erase(it);
 
 	QMetaObject::invokeMethod(
-	    this->mFrontend,
-	    [frontend = this->mFrontend, sessionId] { frontend->backendRemovePlayer(sessionId); },
+	    QCoreApplication::instance(),
+	    [frontend = this->mFrontend, sessionId] {
+		    if (frontend) frontend->backendRemovePlayer(sessionId);
+	    },
 	    Qt::QueuedConnection
 	);
 }
@@ -335,9 +339,9 @@ void GsmtcWorker::refreshPlaybackInfo(quint64 sessionId) {
 
 	auto snapshot = this->buildPlaybackSnapshot(it->second->session);
 	QMetaObject::invokeMethod(
-	    this->mFrontend,
+	    QCoreApplication::instance(),
 	    [frontend = this->mFrontend, sessionId, snapshot] {
-		    frontend->backendUpdatePlaybackInfo(sessionId, snapshot);
+		    if (frontend) frontend->backendUpdatePlaybackInfo(sessionId, snapshot);
 	    },
 	    Qt::QueuedConnection
 	);
@@ -349,9 +353,9 @@ void GsmtcWorker::refreshTimeline(quint64 sessionId) {
 
 	auto snapshot = this->buildTimelineSnapshot(it->second->session);
 	QMetaObject::invokeMethod(
-	    this->mFrontend,
+	    QCoreApplication::instance(),
 	    [frontend = this->mFrontend, sessionId, snapshot] {
-		    frontend->backendUpdateTimeline(sessionId, snapshot);
+		    if (frontend) frontend->backendUpdateTimeline(sessionId, snapshot);
 	    },
 	    Qt::QueuedConnection
 	);
@@ -436,9 +440,9 @@ void GsmtcWorker::refreshMediaProperties(quint64 sessionId) {
 		};
 
 		QMetaObject::invokeMethod(
-		    this->mFrontend,
+		    QCoreApplication::instance(),
 		    [frontend = this->mFrontend, sessionId, snapshot] {
-			    frontend->backendUpdateMediaProperties(sessionId, snapshot);
+			    if (frontend) frontend->backendUpdateMediaProperties(sessionId, snapshot);
 		    },
 		    Qt::QueuedConnection
 		);

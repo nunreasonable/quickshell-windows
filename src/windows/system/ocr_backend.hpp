@@ -1,5 +1,7 @@
 #pragma once
 
+#include <memory>
+
 #include <qobject.h>
 #include <qstring.h>
 #include <qtclasshelpermacros.h>
@@ -22,7 +24,7 @@ public:
 	void requestRecognize(int requestId, const QString& path);
 
 private:
-	QThread mThread;
+	std::unique_ptr<QThread> mThread;
 	OcrWorker* mWorker = nullptr;
 	bool mStarted = false;
 };

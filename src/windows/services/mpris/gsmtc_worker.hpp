@@ -5,6 +5,7 @@
 
 #include <qbytearray.h>
 #include <qobject.h>
+#include <qpointer.h>
 #include <qstring.h>
 #include <qtclasshelpermacros.h>
 #include <qtmetamacros.h>
@@ -80,7 +81,7 @@ private:
 	    const winrt::Windows::Media::Control::GlobalSystemMediaTransportControlsSession& session
 	) const;
 
-	Mpris* mFrontend;
+	QPointer<Mpris> mFrontend;
 
 	winrt::Windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager mManager {
 	    nullptr

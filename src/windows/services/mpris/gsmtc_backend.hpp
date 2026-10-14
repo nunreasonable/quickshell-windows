@@ -1,5 +1,7 @@
 #pragma once
 
+#include <memory>
+
 #include <qobject.h>
 #include <qtclasshelpermacros.h>
 #include <qthread.h>
@@ -30,7 +32,7 @@ public:
 	void setLoopState(quint64 sessionId, MprisLoopState::Enum state);
 
 private:
-	QThread mThread;
+	std::unique_ptr<QThread> mThread;
 	GsmtcWorker* mWorker = nullptr;
 };
 

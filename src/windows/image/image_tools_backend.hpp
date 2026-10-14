@@ -1,5 +1,7 @@
 #pragma once
 
+#include <memory>
+
 #include <qobject.h>
 #include <qstring.h>
 #include <qtclasshelpermacros.h>
@@ -45,7 +47,7 @@ public:
 private:
 	void ensureStarted();
 
-	QThread mThread;
+	std::unique_ptr<QThread> mThread;
 	ImageToolsWorker* mWorker = nullptr;
 	bool mStarted = false;
 };

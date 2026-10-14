@@ -54,7 +54,7 @@ private:
 	void updatePlaying();
 
 	QString mPath;
-	QThread thread;
+	std::unique_ptr<QThread> thread;
 	VideoWorker* worker = nullptr;
 	std::shared_ptr<FrameSlot> slot;
 	QHash<const void*, bool> viewers;

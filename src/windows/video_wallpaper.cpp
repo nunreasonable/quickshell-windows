@@ -51,6 +51,7 @@ constexpr int MAX_HEIGHT = 2160;
 constexpr int SOFTWARE_MAX_WIDTH = 1280;
 constexpr int SOFTWARE_MAX_HEIGHT = 720;
 constexpr UINT MICROSOFT_VENDOR_ID = 0x1414;
+constexpr unsigned long STOP_TIMEOUT_MS = 3000;
 
 bool isSoftwareDevice(ID3D11Device* device) {
 	winrt::com_ptr<IDXGIDevice> dxgi;
@@ -450,23 +451,31 @@ void VideoWorker::shutdown() {
 
 VideoSource::VideoSource(QString path)
     : mPath(std::move(path))
+    , thread(std::make_unique<QThread>())
     , slot(std::make_shared<FrameSlot>()) {
 	this->worker = new VideoWorker(this->mPath, this->slot);
-	this->worker->moveToThread(&this->thread);
+	this->worker->moveToThread(this->thread.get());
 
-	QObject::connect(&this->thread, &QThread::started, this->worker, &VideoWorker::start);
+	QObject::connect(this->thread.get(), &QThread::started, this->worker, &VideoWorker::start);
+	QObject::connect(this->thread.get(), &QThread::finished, this->worker, &VideoWorker::shutdown);
 	QObject::connect(this->worker, &VideoWorker::ready, this, &VideoSource::onReady);
 	QObject::connect(this->worker, &VideoWorker::failed, this, &VideoSource::onFailed);
 	QObject::connect(this->worker, &VideoWorker::frameReady, this, &VideoSource::frameReady);
 
-	this->thread.setObjectName(QStringLiteral("qs-video"));
-	this->thread.start();
+	this->thread->setObjectName(QStringLiteral("qs-video"));
+	this->thread->start();
 }
 
 VideoSource::~VideoSource() {
-	QMetaObject::invokeMethod(this->worker, &VideoWorker::shutdown, Qt::BlockingQueuedConnection);
-	this->thread.quit();
-	this->thread.wait();
+	QObject::disconnect(this->worker, nullptr, this, nullptr);
+
+	this->thread->quit();
+	if (!this->thread->wait(STOP_TIMEOUT_MS)) {
+		qCWarning(logVideo) << "Video worker for" << this->mPath << "didn't stop in time";
+		(void) this->thread.release();
+		return;
+	}
+
 	delete this->worker;
 }
 

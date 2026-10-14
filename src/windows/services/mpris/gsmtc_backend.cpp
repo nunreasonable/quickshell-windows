@@ -1,5 +1,8 @@
 #include "gsmtc_backend.hpp"
+#include <memory>
 
+#include <qlogging.h>
+#include <qloggingcategory.h>
 #include <qmetaobject.h>
 #include <qobject.h>
 #include <qthread.h>
@@ -11,19 +14,30 @@
 
 namespace qs::windows::services::mpris {
 
-GsmtcBackend::GsmtcBackend(Mpris* frontend) {
+namespace {
+Q_LOGGING_CATEGORY(logMprisBackend, "quickshell.windows.mpris", QtWarningMsg);
+
+constexpr unsigned long STOP_TIMEOUT_MS = 3000;
+} // namespace
+
+GsmtcBackend::GsmtcBackend(Mpris* frontend): mThread(std::make_unique<QThread>()) {
 	this->mWorker = new GsmtcWorker(frontend);
-	this->mWorker->moveToThread(&this->mThread);
+	this->mWorker->moveToThread(this->mThread.get());
 
-	QObject::connect(&this->mThread, &QThread::started, this->mWorker, &GsmtcWorker::start);
-	QObject::connect(&this->mThread, &QThread::finished, this->mWorker, &GsmtcWorker::shutdown);
+	QObject::connect(this->mThread.get(), &QThread::started, this->mWorker, &GsmtcWorker::start);
+	QObject::connect(this->mThread.get(), &QThread::finished, this->mWorker, &GsmtcWorker::shutdown);
 
-	startup::afterFirstFrame(this, [this]() { this->mThread.start(); });
+	startup::afterFirstFrame(this, [this]() { this->mThread->start(); });
 }
 
 GsmtcBackend::~GsmtcBackend() {
-	this->mThread.quit();
-	this->mThread.wait();
+	this->mThread->quit();
+	if (!this->mThread->wait(STOP_TIMEOUT_MS)) {
+		qCWarning(logMprisBackend) << "Media session worker didn't stop in time";
+		(void) this->mThread.release();
+		return;
+	}
+
 	delete this->mWorker;
 }
 
