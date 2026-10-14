@@ -42,7 +42,6 @@ Q_LOGGING_CATEGORY(logHotkeys, "quickshell.windows.hotkeys", QtInfoMsg);
 
 constexpr auto MESSAGE_WINDOW_CLASS = L"QuickshellHotkeys";
 constexpr UINT WM_QS_HOOK_BASE = WM_APP + 16;
-constexpr auto USER_FILE = "illogical-impulse/keybinds.json";
 constexpr auto DEFAULT_FILE = "defaults/windows/keybinds.json";
 
 constexpr int RELEASE_POLL_MS = 15;
@@ -476,9 +475,17 @@ void HotkeyManager::reload() {
 }
 
 QString HotkeyManager::userFilePath() const {
+	if (this->userFile.isEmpty()) return QString();
+	if (!QDir::isRelativePath(this->userFile)) return this->userFile;
 	auto base = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation);
 	if (base.isEmpty()) return QString();
-	return base + '/' + USER_FILE;
+	return base + '/' + this->userFile;
+}
+
+QString HotkeyManager::readUserFile() const {
+	auto file = QFile(this->defaultFilePath());
+	if (this->defaultFilePath().isEmpty() || !file.open(QFile::ReadOnly)) return QString();
+	return QJsonDocument::fromJson(file.readAll()).object().value("userFile").toString().trimmed();
 }
 
 QString HotkeyManager::defaultFilePath() const {
@@ -489,6 +496,7 @@ QString HotkeyManager::defaultFilePath() const {
 void HotkeyManager::scheduleReload() { this->reloadTimer.start(); }
 
 void HotkeyManager::loadFile() {
+	this->userFile = this->readUserFile();
 	auto path = this->userFilePath();
 	if (path.isEmpty() || !QFileInfo::exists(path)) path = this->defaultFilePath();
 
@@ -499,8 +507,10 @@ void HotkeyManager::loadFile() {
 
 	if (!this->parsed || path != this->mConfigPath || data != this->loadedData) {
 		if (path.isEmpty()) {
-			qCWarning(logHotkeys) << "No keybinds file found (looked for" << this->userFilePath() << "and"
-			                      << this->defaultFilePath() << "), global shortcuts are disabled.";
+			auto looked = QStringList {this->userFilePath(), this->defaultFilePath()};
+			looked.removeAll(QString());
+			qCWarning(logHotkeys).noquote() << "No keybinds file found (looked for" << looked.join(" and ")
+			                                << "), global shortcuts are disabled.";
 		}
 
 		this->parsed = true;
@@ -554,13 +564,15 @@ void HotkeyManager::mergeDefaults() {
 
 void HotkeyManager::updateWatches() {
 	auto userPath = this->userFilePath();
-	auto userDir = QFileInfo(userPath).absolutePath();
 
 	QStringList wanted;
 	if (!this->mConfigPath.isEmpty()) wanted.append(this->mConfigPath);
-	if (QFileInfo::exists(userDir)) wanted.append(userDir);
-	else if (!userPath.isEmpty()) {
-		wanted.append(QFileInfo(userDir).absolutePath());
+	auto defaultPath = this->defaultFilePath();
+	if (!defaultPath.isEmpty() && !wanted.contains(defaultPath)) wanted.append(defaultPath);
+	if (!userPath.isEmpty()) {
+		auto userDir = QFileInfo(userPath).absolutePath();
+		if (QFileInfo::exists(userDir)) wanted.append(userDir);
+		else wanted.append(QFileInfo(userDir).absolutePath());
 	}
 
 	auto current = this->watcher.files() + this->watcher.directories();

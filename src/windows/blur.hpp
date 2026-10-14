@@ -114,8 +114,10 @@ private:
 
 	[[nodiscard]] QString userFilePath() const;
 	[[nodiscard]] QString defaultFilePath() const;
+	[[nodiscard]] QString readUserFile() const;
 
 	QString shellDir;
+	QString userFile;
 	QString mConfigPath;
 	QByteArray loadedData;
 	bool loaded = false;

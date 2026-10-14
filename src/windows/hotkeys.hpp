@@ -123,11 +123,13 @@ private:
 
 	[[nodiscard]] QString userFilePath() const;
 	[[nodiscard]] QString defaultFilePath() const;
+	[[nodiscard]] QString readUserFile() const;
 
 	static LRESULT CALLBACK messageWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 	HWND messageWindow = nullptr;
 	QString shellDir;
+	QString userFile;
 	QString mConfigPath;
 	QByteArray loadedData;
 	bool loaded = false;

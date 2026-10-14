@@ -66,7 +66,6 @@ namespace {
 
 Q_LOGGING_CATEGORY(logBlur, "quickshell.windows.blur", QtInfoMsg);
 
-constexpr auto USER_FILE = "illogical-impulse/layerrules.json";
 constexpr auto DEFAULT_FILE = "defaults/windows/layerrules.json";
 constexpr auto PERSONALIZE_KEY = L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize";
 constexpr auto BACKDROP_CLASS = L"QuickshellBlurBackdrop";
@@ -1182,9 +1181,17 @@ void BlurManager::reload() {
 }
 
 QString BlurManager::userFilePath() const {
+	if (this->userFile.isEmpty()) return QString();
+	if (!QDir::isRelativePath(this->userFile)) return this->userFile;
 	auto base = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation);
 	if (base.isEmpty()) return QString();
-	return base + '/' + USER_FILE;
+	return base + '/' + this->userFile;
+}
+
+QString BlurManager::readUserFile() const {
+	auto file = QFile(this->defaultFilePath());
+	if (this->defaultFilePath().isEmpty() || !file.open(QFile::ReadOnly)) return QString();
+	return QJsonDocument::fromJson(file.readAll()).object().value("userFile").toString().trimmed();
 }
 
 QString BlurManager::defaultFilePath() const {
@@ -1195,6 +1202,7 @@ QString BlurManager::defaultFilePath() const {
 void BlurManager::scheduleReload() { this->reloadTimer.start(); }
 
 void BlurManager::loadFile() {
+	this->userFile = this->readUserFile();
 	auto path = this->userFilePath();
 	if (path.isEmpty() || !QFileInfo::exists(path)) path = this->defaultFilePath();
 
@@ -1205,8 +1213,10 @@ void BlurManager::loadFile() {
 
 	if (!this->parsed || path != this->mConfigPath || data != this->loadedData) {
 		if (path.isEmpty()) {
-			qCInfo(logBlur) << "No layer rules file found (looked for" << this->userFilePath() << "and"
-			                << this->defaultFilePath() << "), blur behind panels is off.";
+			auto looked = QStringList {this->userFilePath(), this->defaultFilePath()};
+			looked.removeAll(QString());
+			qCInfo(logBlur).noquote() << "No layer rules file found (looked for" << looked.join(" and ")
+			                          << "), blur behind panels is off.";
 		}
 
 		auto wasLayered = this->layeredBackdrops();
@@ -1231,13 +1241,15 @@ void BlurManager::loadFile() {
 
 void BlurManager::updateWatches() {
 	auto userPath = this->userFilePath();
-	auto userDir = QFileInfo(userPath).absolutePath();
 
 	QStringList wanted;
 	if (!this->mConfigPath.isEmpty()) wanted.append(this->mConfigPath);
-	if (QFileInfo::exists(userDir)) wanted.append(userDir);
-	else if (!userPath.isEmpty()) {
-		wanted.append(QFileInfo(userDir).absolutePath());
+	auto defaultPath = this->defaultFilePath();
+	if (!defaultPath.isEmpty() && !wanted.contains(defaultPath)) wanted.append(defaultPath);
+	if (!userPath.isEmpty()) {
+		auto userDir = QFileInfo(userPath).absolutePath();
+		if (QFileInfo::exists(userDir)) wanted.append(userDir);
+		else wanted.append(QFileInfo(userDir).absolutePath());
 	}
 
 	auto current = this->watcher.files() + this->watcher.directories();
