@@ -335,6 +335,10 @@ void Clipboard::startCapture() {
 
 	auto sequence = GetClipboardSequenceNumber();
 	if (sequence != 0 && sequence == this->capturedSequence) return;
+	if (sequence != 0 && sequence == this->suppressedSequence) {
+		this->capturedSequence = sequence;
+		return;
+	}
 
 	this->capturing = true;
 	auto id = this->nextId++;
@@ -359,7 +363,8 @@ void Clipboard::finishCapture(const ClipboardCapture& capture) {
 	this->capturing = false;
 	if (capture.sequence != 0) this->capturedSequence = capture.sequence;
 
-	auto stale = capture.sequence < this->writtenSequence;
+	auto stale = capture.sequence < this->writtenSequence
+	          || (capture.sequence != 0 && capture.sequence == this->suppressedSequence);
 
 	if (capture.captured && capture.entry.isImage) {
 		if (stale) QFile::remove(capture.entry.imagePath);
@@ -499,8 +504,9 @@ void Clipboard::copy(qint64 id) {
 		this->writeTextToClipboard(entry.text);
 	}
 
-	CloseClipboard();
 	this->noteOwnWrite();
+	this->suppressedSequence = this->writtenSequence;
+	CloseClipboard();
 	this->suppressNextCaptureFor = id;
 }
 

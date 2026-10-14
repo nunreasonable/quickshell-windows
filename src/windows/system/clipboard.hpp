@@ -78,6 +78,7 @@ private:
 	bool captureAgain = false;
 	quint32 capturedSequence = 0;
 	quint32 writtenSequence = 0;
+	quint32 suppressedSequence = 0;
 
 	Q_OBJECT_BINDABLE_PROPERTY(Clipboard, QStringList, bEntries, &Clipboard::entriesChanged);
 };
