@@ -13,7 +13,7 @@ modules) are implemented on top of Win32, COM and WinRT, so a config written for
 | logs | `%LOCALAPPDATA%\quickshell\run\by-id\<instance>\log.log`, or `qs log` |
 | crash dumps | `%LOCALAPPDATA%\quickshell\cache\crashes\<instance>\*.dmp` (minidumps, the shell restarts itself) |
 | IPC | named pipes instead of Unix sockets; `qs ipc`, `qs list` and `qs kill` work the same |
-| fonts | a `fonts` folder next to `qs.exe` is loaded at startup for that process only |
+| fonts | a `fonts` folder next to `qs.exe` is loaded at startup for that process only, skipping any family Windows already has installed (two versions of one family would mix their glyphs) |
 
 `qs.exe` is a console program and `qsw.exe` is the same binary built for the Windows subsystem, so it doesn't open a
 console window. Hot reload is on, like on Linux: saving a file in the config reloads it.
@@ -82,9 +82,27 @@ Modifiers are `Ctrl`, `Alt`, `Shift` and `Super`; keys are letters, digits, `F1`
 `Space`, `Tab`, `Escape`, `Slash`, `Page_Down`, `Print` or `VolumeUp` (case doesn't matter).
 Only the config's own `shell.qml` loads binds.
 
-A known leftover from ii-windows: if `%LOCALAPPDATA%\illogical-impulse\keybinds.json` exists, it is used instead of
-the config's file, for every config. The same goes for `layerrules.json` in that folder. This will become a
-per-config setting; for now, keep it in mind if ii-windows is installed too.
+To let people override your binds without touching the config, name a user file in the defaults file with
+`"userFile"`. A relative path starts at `%LOCALAPPDATA%`; when that file exists it wins over the defaults and is
+reloaded on save. ii-windows uses `"userFile": "illogical-impulse/keybinds.json"`. `layerrules.json` takes the
+same key. Without it, only the config's own file is read.
+
+A user keybinds file can also list only its changes, so later changes to the defaults still reach it:
+
+```json
+{
+  "extends": "defaults",
+  "binds": [
+    {"base": "global:quickshell:oskToggle", "disabled": true},
+    {"base": "dispatch:killactive", "keys": "Super+C"},
+    {"keys": "Super+E", "action": "exec", "command": "explorer.exe"}
+  ]
+}
+```
+
+`base` names a default bind by its action and argument (`global:<appid>:<name>`, `dispatch:<dispatcher>`,
+`exec:<command>`, `ipc:<target>:<function>`, `key:<key>`), with `@<keys>` added when several defaults share it.
+`keys` moves it, `disabled` gives its keys back to Windows, and binds without `base` are added.
 
 ## Hyprland compatibility
 
@@ -132,6 +150,11 @@ uses where Linux would call a command-line tool.
   and C++/WinRT doesn't allow blocking calls there, so every WinRT service owns a worker thread and posts its
   results back to Qt.
 - Qt Quick uses Direct3D 11 on Windows; translucent frameless windows work as they are.
+- With more than one window on screen, Qt advances animations from a timer sized by the primary screen's refresh
+  rate, so a 60 Hz primary made everything step at 60 Hz on a faster monitor. Quickshell installs its own scene
+  graph context (`qswindows`) that ticks at the fastest screen's rate (up to 250 Hz) with wall-clock timing, and
+  slows to about 30 steps per second while animations run only in hidden windows. `QS_WINDOWS_ANIMATION_HZ` caps
+  the rate, `0` turns it off, and setting `QT_QUICK_BACKEND` also leaves Qt's own timing in place.
 - Windows that stay hidden for 10 seconds free their graphics resources (`QS_RELEASE_HIDDEN_MS`, `-1` turns it off).
 - Unpackaged, the notification listener is allowed by default, but `NotificationChanged` throws, so the mirror polls
   every 2 seconds.
