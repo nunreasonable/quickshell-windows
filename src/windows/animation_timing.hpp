@@ -3,5 +3,6 @@
 namespace qs::windows {
 
 void installAnimationTiming();
+float animationIntervalMs();
 
 }

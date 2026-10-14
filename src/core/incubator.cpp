@@ -15,6 +15,10 @@
 
 #include "logcat.hpp"
 
+#ifdef Q_OS_WIN
+#include "../windows/animation_timing.hpp"
+#endif
+
 QS_LOGGING_CATEGORY(logIncubator, "quickshell.incubator", QtWarningMsg);
 
 void QsQmlIncubator::statusChanged(QQmlIncubator::Status status) {
@@ -107,6 +111,9 @@ void QsIncubationController::incubate() {
 			this->incubateFor(10);
 			if (this->incubatingObjectCount()) this->incubateLater();
 		} else if (this->renderLoop->interleaveIncubation()) {
+#ifdef Q_OS_WIN
+			this->updateIncubationTime();
+#endif
 			this->incubateFor(this->incubationTime);
 		} else {
 			this->incubateFor(this->incubationTime * 2);
@@ -127,9 +134,13 @@ void QsIncubationController::incubatingObjectCountChanged(int count) {
 }
 
 void QsIncubationController::updateIncubationTime() {
+#ifdef Q_OS_WIN
+	this->incubationTime = qMax(1, static_cast<int>(qs::windows::animationIntervalMs() / 3));
+#else
 	auto* screen = QGuiApplication::primaryScreen();
 	if (!screen) return;
 
 	// 1/3 frame on primary screen
 	this->incubationTime = qMax(1, static_cast<int>(1000 / screen->refreshRate() / 3));
+#endif
 }
