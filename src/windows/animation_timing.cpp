@@ -30,6 +30,7 @@ constexpr auto BACKEND_KEY = "qswindows";
 constexpr qreal DEFAULT_MAX_REFRESH_RATE = 250;
 constexpr qint64 IDLE_AFTER_MS = 250;
 constexpr qint64 IDLE_STEP_MS = 33;
+constexpr float INTERVAL_SLACK_MS = 0.05f;
 
 bool anyVisibleChange() {
 	for (auto* window: QGuiApplication::topLevelWindows()) {
@@ -118,7 +119,7 @@ public:
 	}
 
 	float vsyncIntervalForAnimationDriver(QAnimationDriver* /*driver*/) override {
-		return gInterval.load();
+		return gInterval.load() + INTERVAL_SLACK_MS;
 	}
 
 	bool isVSyncDependent(QAnimationDriver* /*driver*/) override { return true; }
