@@ -98,7 +98,7 @@ if (CRASH_HANDLER)
 	add_subdirectory(crash)
 endif()
 
-add_library(quickshell-windows-init OBJECT init.cpp)
+add_library(quickshell-windows-init OBJECT init.cpp animation_timing.cpp)
 
 target_link_libraries(quickshell-windows PRIVATE
 	Qt::Quick
@@ -132,7 +132,8 @@ target_link_libraries(quickshell-windows PRIVATE
 	mfuuid
 	delayimp
 )
-target_link_libraries(quickshell-windows-init PRIVATE Qt::Quick Qt::Qml)
+target_link_libraries(quickshell-windows-init PRIVATE Qt::Quick Qt::QuickPrivate Qt::Qml)
+set_source_files_properties(animation_timing.cpp PROPERTIES COMPILE_DEFINITIONS QT_STATICPLUGIN)
 
 qs_module_pch(quickshell-windows SET large)
 

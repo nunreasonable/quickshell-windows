@@ -9,6 +9,7 @@
 #include <qicon.h>
 #include <qlist.h>
 #include <qlogging.h>
+#include <qplugin.h>
 #include <qpointer.h>
 #include <qqml.h>
 #include <qquickwindow.h>
@@ -18,12 +19,15 @@
 
 #include "../core/logcat.hpp"
 #include "../core/plugin.hpp"
+#include "animation_timing.hpp"
 #include "appbar.hpp"
 #include "desktopentry_backend.hpp"
 #include "panel_window.hpp"
 #include "util.hpp"
 
 #include <dwmapi.h>
+
+Q_IMPORT_PLUGIN(QsWindowsSceneGraphPlugin);
 
 namespace {
 
@@ -166,6 +170,7 @@ class WindowsPlugin: public QsEnginePlugin {
 	void init() override {
 		qs::windows::optOutOfProcessPowerThrottling();
 		qs::windows::WinAppBar::removeStale();
+		qs::windows::installAnimationTiming();
 		auto timer = QElapsedTimer();
 		timer.start();
 		loadBundledFonts();
