@@ -9,10 +9,12 @@
 #include <qcoreapplication.h>
 #include <qdatetime.h>
 #include <qfileinfo.h>
+#include <qguiapplication.h>
 #include <qlogging.h>
 #include <qloggingcategory.h>
 #include <qmetaobject.h>
 #include <qpointer.h>
+#include <qscreen.h>
 #include <qstring.h>
 
 #include "../core/logcat.hpp"
@@ -36,6 +38,7 @@ constexpr int CHECK_CONCEALED_MS = 2000;
 constexpr qint64 BURST_MS = 1000;
 constexpr int BURST_MAX_HIDES = 10;
 constexpr int STALE_AUTOHIDE_CHECK_MS = 15000;
+constexpr int DISPLAY_SETTLE_MS = 1000;
 
 constexpr auto STATE_KEY = L"Software\\Quickshell";
 constexpr auto AUTOHIDE_OWNED_VALUE = L"TaskbarAutoHideOwned";
@@ -159,6 +162,32 @@ TaskbarManager* TaskbarManager::instance() {
 
 TaskbarManager::TaskbarManager(QObject* parent): QObject(parent) {
 	QObject::connect(&this->checkTimer, &QTimer::timeout, this, &TaskbarManager::onCheck);
+
+	this->displayTimer.setSingleShot(true);
+	this->displayTimer.setInterval(DISPLAY_SETTLE_MS);
+	QObject::connect(&this->displayTimer, &QTimer::timeout, this, &TaskbarManager::onDisplayChanged);
+
+	if (auto* app = qobject_cast<QGuiApplication*>(QCoreApplication::instance())) {
+		auto schedule = [this]() { this->displayTimer.start(); };
+		auto watchScreen = [this, schedule](QScreen* screen) {
+			QObject::connect(screen, &QScreen::geometryChanged, this, schedule);
+			QObject::connect(screen, &QScreen::logicalDotsPerInchChanged, this, schedule);
+		};
+
+		for (auto* screen: QGuiApplication::screens()) watchScreen(screen);
+
+		QObject::connect(
+		    app,
+		    &QGuiApplication::screenAdded,
+		    this,
+		    [watchScreen, schedule](QScreen* screen) {
+			    watchScreen(screen);
+			    schedule();
+		    }
+		);
+		QObject::connect(app, &QGuiApplication::screenRemoved, this, schedule);
+		QObject::connect(app, &QGuiApplication::primaryScreenChanged, this, schedule);
+	}
 
 	QObject::connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, this, [this]() {
 		this->disable(false);
@@ -452,7 +481,10 @@ void CALLBACK TaskbarManager::onWinEvent(
 
 void TaskbarManager::onBarShown(HWND hwnd) {
 	if (!this->enabled || this->revealed) return;
-	if (!std::ranges::any_of(this->bars, [hwnd](const Bar& bar) { return bar.hwnd == hwnd; })) return;
+	if (!std::ranges::any_of(this->bars, [hwnd](const Bar& bar) { return bar.hwnd == hwnd; })) {
+		if (!isTaskbarWindow(hwnd)) return;
+		this->findBars();
+	}
 
 	POINT cursor {};
 	GetCursorPos(&cursor);
@@ -531,6 +563,13 @@ void TaskbarManager::onCheck() {
 	auto now = QDateTime::currentMSecsSinceEpoch();
 	if (this->leftAt == 0) this->leftAt = now;
 	else if (now - this->leftAt >= HIDE_DELAY_MS) this->conceal();
+}
+
+void TaskbarManager::onDisplayChanged() {
+	if (!this->enabled) return;
+
+	this->findBars();
+	if (!this->revealed) this->conceal();
 }
 
 Taskbar::Taskbar(QObject* parent): QObject(parent) {

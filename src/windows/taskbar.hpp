@@ -48,6 +48,7 @@ private:
 	void findBars();
 	void onCursorMoved(QPoint position);
 	void onCheck();
+	void onDisplayChanged();
 	void reveal();
 	void conceal();
 	[[nodiscard]] bool atTrigger(QPoint position) const;
@@ -72,6 +73,7 @@ private:
 	qint64 leftAt = 0;
 	QList<Bar> bars;
 	QTimer checkTimer;
+	QTimer displayTimer;
 	HWINEVENTHOOK showHook = nullptr;
 	DWORD watchedPid = 0;
 	qint64 burstStart = 0;
