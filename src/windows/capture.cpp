@@ -165,8 +165,8 @@ bool SharedFrameReader::open(ID3D11Device* device, const std::shared_ptr<SharedF
 bool SharedFrameReader::copyTo(ID3D11DeviceContext* context, ID3D11Texture2D* dest) {
 	if (this->mutex == nullptr) return false;
 
-	auto hr = this->mutex->AcquireSync(KEY_CONSUMER, 2);
-	if (hr != S_OK) hr = this->mutex->AcquireSync(KEY_PRODUCER, 2);
+	auto hr = this->mutex->AcquireSync(KEY_CONSUMER, 0);
+	if (hr != S_OK) hr = this->mutex->AcquireSync(KEY_PRODUCER, 0);
 	if (hr != S_OK) return false;
 
 	context->CopyResource(dest, this->opened);
