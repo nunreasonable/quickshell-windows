@@ -504,9 +504,9 @@ void Clipboard::copy(qint64 id) {
 		this->writeTextToClipboard(entry.text);
 	}
 
+	CloseClipboard();
 	this->noteOwnWrite();
 	this->suppressedSequence = this->writtenSequence;
-	CloseClipboard();
 	this->suppressNextCaptureFor = id;
 }
 
