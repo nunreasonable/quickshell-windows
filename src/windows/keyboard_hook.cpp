@@ -5,6 +5,7 @@
 #include <memory>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include <qlogging.h>
 #include <qloggingcategory.h>
@@ -100,6 +101,11 @@ INPUT keyInput(uint8_t vk, bool up, WORD scan = 0, bool extended = false) {
 	input.ki.dwFlags = (up ? KEYEVENTF_KEYUP : 0) | (extended ? KEYEVENTF_EXTENDEDKEY : 0);
 	input.ki.dwExtraInfo = KeyboardHook::INJECTION_MARKER;
 	return input;
+}
+
+INPUT chordInput(uint8_t vk, bool up) {
+	auto scan = static_cast<WORD>(MapVirtualKeyW(vk, MAPVK_VK_TO_VSC));
+	return keyInput(vk, up, scan, isExtendedKey(vk));
 }
 
 void injectMask() {
@@ -428,6 +434,68 @@ bool KeyboardHook::sendKey(uint8_t vk) {
 	    keyInput(vk, false, scan, extended),
 	    keyInput(vk, true, scan, extended),
 	};
+
+	return SendInput(static_cast<UINT>(inputs.size()), inputs.data(), sizeof(INPUT)) == inputs.size();
+}
+
+bool KeyboardHook::sendChord(uint8_t mods, uint8_t vk, int times) {
+	struct Group {
+		uint8_t bit;
+		uint8_t left;
+		uint8_t right;
+	};
+
+	static constexpr std::array<Group, 4> groups {{
+	    {.bit = ModCtrl, .left = VK_LCONTROL, .right = VK_RCONTROL},
+	    {.bit = ModAlt, .left = VK_LMENU, .right = VK_RMENU},
+	    {.bit = ModShift, .left = VK_LSHIFT, .right = VK_RSHIFT},
+	    {.bit = ModSuper, .left = VK_LWIN, .right = VK_RWIN},
+	}};
+
+	std::vector<INPUT> lift;
+	std::vector<INPUT> press;
+	std::vector<INPUT> restore;
+	auto masked = false;
+
+	for (const auto& group: groups) {
+		if ((mods & group.bit) != 0) {
+			if (!isDown(group.left) && !isDown(group.right)) {
+				press.push_back(chordInput(group.left, false));
+			}
+
+			continue;
+		}
+
+		for (auto key: {group.left, group.right}) {
+			if (!isDown(key)) continue;
+			lift.push_back(chordInput(key, true));
+			restore.push_back(chordInput(key, false));
+			masked = masked || group.bit == ModSuper || group.bit == ModAlt;
+		}
+	}
+
+	std::vector<INPUT> inputs;
+	auto mask = [&inputs]() {
+		inputs.push_back(keyInput(KeyboardHook::MASK_KEY, false));
+		inputs.push_back(keyInput(KeyboardHook::MASK_KEY, true));
+	};
+
+	if (masked) mask();
+	inputs.insert(inputs.end(), lift.begin(), lift.end());
+	inputs.insert(inputs.end(), press.begin(), press.end());
+
+	for (auto i = 0; i < times; i++) {
+		inputs.push_back(chordInput(vk, false));
+		inputs.push_back(chordInput(vk, true));
+	}
+
+	for (auto input = press.rbegin(); input != press.rend(); ++input) {
+		input->ki.dwFlags |= KEYEVENTF_KEYUP;
+		inputs.push_back(*input);
+	}
+
+	inputs.insert(inputs.end(), restore.begin(), restore.end());
+	if (masked) mask();
 
 	return SendInput(static_cast<UINT>(inputs.size()), inputs.data(), sizeof(INPUT)) == inputs.size();
 }

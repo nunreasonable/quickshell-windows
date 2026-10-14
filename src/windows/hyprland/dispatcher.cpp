@@ -15,6 +15,7 @@
 #include <qstringlist.h>
 #include <qtypes.h>
 
+#include "../keyboard_hook.hpp"
 #include "../tiling.hpp"
 #include "../virtual_desktops.hpp"
 #include "../window_manager.hpp"
@@ -32,18 +33,10 @@ namespace {
 Q_LOGGING_CATEGORY(logDispatch, "quickshell.hyprland.dispatch", QtWarningMsg);
 
 void sendWinShortcut(WORD key) {
-	INPUT inputs[4] {};
-	inputs[0].type = INPUT_KEYBOARD;
-	inputs[0].ki.wVk = VK_LWIN;
-	inputs[1].type = INPUT_KEYBOARD;
-	inputs[1].ki.wVk = key;
-	inputs[2].type = INPUT_KEYBOARD;
-	inputs[2].ki.wVk = key;
-	inputs[2].ki.dwFlags = KEYEVENTF_KEYUP;
-	inputs[3].type = INPUT_KEYBOARD;
-	inputs[3].ki.wVk = VK_LWIN;
-	inputs[3].ki.dwFlags = KEYEVENTF_KEYUP;
-	SendInput(4, inputs, sizeof(INPUT));
+	qs::windows::hotkeys::KeyboardHook::sendChord(
+	    qs::windows::hotkeys::ModSuper,
+	    static_cast<uint8_t>(key)
+	);
 }
 
 std::optional<TilingManager::Edge> directionEdge(const QString& direction) {

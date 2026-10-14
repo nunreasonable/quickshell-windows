@@ -11,6 +11,7 @@
 #include <qtimer.h>
 #include <qtypes.h>
 
+#include "keyboard_hook.hpp"
 #include "startup.hpp"
 #include "util.hpp"
 
@@ -551,25 +552,11 @@ bool VirtualDesktops::isWindowOnCurrent(HWND hwnd) const {
 }
 
 void VirtualDesktops::sendShortcut(WORD key, int times) const {
-	QList<INPUT> inputs;
-	auto push = [&inputs](WORD vk, bool up) {
-		INPUT input {};
-		input.type = INPUT_KEYBOARD;
-		input.ki.wVk = vk;
-		input.ki.dwFlags = up ? KEYEVENTF_KEYUP : 0;
-		inputs.append(input);
-	};
-
-	for (auto i = 0; i < times; i++) {
-		push(VK_LCONTROL, false);
-		push(VK_LWIN, false);
-		push(key, false);
-		push(key, true);
-		push(VK_LWIN, true);
-		push(VK_LCONTROL, true);
-	}
-
-	SendInput(static_cast<UINT>(inputs.length()), inputs.data(), sizeof(INPUT));
+	hotkeys::KeyboardHook::sendChord(
+	    static_cast<uint8_t>(hotkeys::ModCtrl | hotkeys::ModSuper),
+	    static_cast<uint8_t>(key),
+	    times
+	);
 }
 
 bool VirtualDesktops::switchTo(qsizetype index) {

@@ -59,6 +59,7 @@ public:
 	static void setSnapshot(std::shared_ptr<const HookSnapshot> snapshot);
 
 	static bool sendKey(uint8_t vk);
+	static bool sendChord(uint8_t mods, uint8_t vk, int times = 1);
 	static void noteSuperChord();
 
 	static constexpr ULONG_PTR INJECTION_MARKER = 0x5153484B;
