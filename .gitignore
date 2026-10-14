@@ -1,6 +1,5 @@
 # related repos
 /docs
-/examples
 
 # build files
 /result
@@ -13,3 +12,7 @@
 # direnv
 /.envrc
 /.direnv/
+
+# windows
+/.toolchain/
+/dist/
