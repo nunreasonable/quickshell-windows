@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <vector>
 
 #include <qobject.h>
@@ -18,6 +19,9 @@ struct ClipboardEntry {
 	qint64 id = 0;
 	bool isImage = false;
 	QString text;
+	QString textPath;
+	qsizetype textLength = 0;
+	size_t textHash = 0;
 	QString preview;
 	QString imagePath;
 	int width = 0;
@@ -67,8 +71,7 @@ private:
 	void noteOwnWrite();
 	QString cacheDir();
 
-	void writeImageToClipboard(const QImage& image);
-	void writeTextToClipboard(const QString& text);
+	void writeData(quint32 format, void* data, std::function<void(Clipboard*)> done, int attempt = 1);
 
 	std::vector<ClipboardEntry> storage;
 	QString mCacheDir;

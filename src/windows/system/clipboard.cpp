@@ -22,6 +22,7 @@
 #include <qstandardpaths.h>
 #include <qstring.h>
 #include <qthreadpool.h>
+#include <qtimer.h>
 
 #include "../../core/backgroundpool.hpp"
 #include "../../core/instanceinfo.hpp"
@@ -35,6 +36,7 @@ QS_LOGGING_CATEGORY(logClipboard, "quickshell.windows.clipboard", QtWarningMsg);
 
 constexpr qsizetype MAX_ENTRIES = 200;
 constexpr qsizetype PREVIEW_CHARS = 500;
+constexpr qsizetype SPILL_CHARS = 32 * 1024;
 constexpr int PNG_QUALITY = 85;
 constexpr int READ_ATTEMPTS = 10;
 constexpr int WRITE_ATTEMPTS = 5;
@@ -88,6 +90,73 @@ QThreadPool* capturePool() {
 	}();
 
 	return pool;
+}
+
+void* globalFromImage(const QImage& imageIn) {
+	auto image = imageIn.convertToFormat(QImage::Format_RGB32);
+
+	BITMAPINFOHEADER bih {};
+	bih.biSize = sizeof(BITMAPINFOHEADER);
+	bih.biWidth = image.width();
+	bih.biHeight = image.height();
+	bih.biPlanes = 1;
+	bih.biBitCount = 32;
+	bih.biCompression = BI_RGB;
+
+	auto pixelBytes = static_cast<SIZE_T>(image.width()) * image.height() * 4;
+	auto* mem = GlobalAlloc(GMEM_MOVEABLE, sizeof(BITMAPINFOHEADER) + pixelBytes);
+	if (mem == nullptr) return nullptr;
+
+	auto* dst = static_cast<unsigned char*>(GlobalLock(mem));
+	if (dst == nullptr) {
+		GlobalFree(mem);
+		return nullptr;
+	}
+
+	memcpy(dst, &bih, sizeof(bih)); // NOLINT
+	for (int y = 0; y < image.height(); y++) {
+		memcpy( // NOLINT
+		    dst + sizeof(bih) + static_cast<SIZE_T>(y) * image.width() * 4,
+		    image.constScanLine(image.height() - 1 - y),
+		    static_cast<SIZE_T>(image.width()) * 4
+		);
+	}
+	GlobalUnlock(mem);
+	return mem;
+}
+
+void* globalFromText(const QString& text) {
+	auto bytes = (text.size() + 1) * sizeof(wchar_t);
+	auto* mem = GlobalAlloc(GMEM_MOVEABLE, bytes);
+	if (mem == nullptr) return nullptr;
+
+	auto* dst = GlobalLock(mem);
+	if (dst == nullptr) {
+		GlobalFree(mem);
+		return nullptr;
+	}
+
+	memcpy(dst, text.utf16(), bytes); // NOLINT
+	GlobalUnlock(mem);
+	return mem;
+}
+
+QString readTextFile(const QString& path) {
+	QFile file(path);
+	if (!file.open(QIODevice::ReadOnly)) return {};
+	return QString::fromUtf8(file.readAll());
+}
+
+void removeEntryFiles(const ClipboardEntry& entry) {
+	if (entry.isImage && !entry.imagePath.isEmpty()) QFile::remove(entry.imagePath);
+	if (!entry.textPath.isEmpty()) QFile::remove(entry.textPath);
+}
+
+bool sameText(const ClipboardEntry& a, const ClipboardEntry& b) {
+	if (a.isImage || b.isImage) return false;
+	if (a.textLength != b.textLength || a.textHash != b.textHash) return false;
+	if (a.textPath.isEmpty() && b.textPath.isEmpty()) return a.text == b.text;
+	return true;
 }
 
 bool openClipboard(HWND owner, int attempts) {
@@ -247,6 +316,20 @@ ClipboardCapture readClipboard(qint64 id, const QString& dir) {
 		capture.entry.text = readText();
 		CloseClipboard();
 		capture.captured = !capture.entry.text.isEmpty();
+		capture.entry.textLength = capture.entry.text.size();
+		capture.entry.textHash = qHash(capture.entry.text);
+
+		if (capture.entry.text.size() > SPILL_CHARS) {
+			auto path = QStringLiteral("%1/%2.txt").arg(dir).arg(id);
+			QFile file(path);
+			if (file.open(QIODevice::WriteOnly) && file.write(capture.entry.text.toUtf8()) >= 0) {
+				file.close();
+				capture.entry.preview = previewOf(capture.entry.text);
+				capture.entry.textPath = path;
+				capture.entry.text.clear();
+			}
+		}
+
 		return capture;
 	}
 
@@ -350,7 +433,7 @@ void Clipboard::startCapture() {
 		    QCoreApplication::instance(),
 		    [self, capture = std::move(capture)]() {
 			    if (self) self->finishCapture(capture);
-			    else if (capture.entry.isImage) QFile::remove(capture.entry.imagePath);
+			    else removeEntryFiles(capture.entry);
 		    },
 		    Qt::QueuedConnection
 		);
@@ -371,6 +454,8 @@ void Clipboard::finishCapture(const ClipboardCapture& capture) {
 		else this->captureImage(capture.entry);
 	} else if (capture.captured && !stale) {
 		this->captureText(capture.entry);
+	} else {
+		removeEntryFiles(capture.entry);
 	}
 
 	if (this->captureAgain) this->startCapture();
@@ -378,19 +463,19 @@ void Clipboard::finishCapture(const ClipboardCapture& capture) {
 
 void Clipboard::captureText(ClipboardEntry entry) {
 	if (!this->storage.empty() && this->suppressNextCaptureFor == this->storage.front().id
-	    && !this->storage.front().isImage && this->storage.front().text == entry.text)
+	    && sameText(this->storage.front(), entry))
 	{
 		this->suppressNextCaptureFor = -1;
+		removeEntryFiles(entry);
 		return;
 	}
 
-	if (!this->storage.empty() && !this->storage.front().isImage
-	    && this->storage.front().text == entry.text)
-	{
+	if (!this->storage.empty() && sameText(this->storage.front(), entry)) {
+		removeEntryFiles(entry);
 		return;
 	}
 
-	entry.preview = previewOf(entry.text);
+	if (entry.preview.isEmpty()) entry.preview = previewOf(entry.text);
 
 	this->storage.insert(this->storage.begin(), std::move(entry));
 	this->trimHistory();
@@ -407,8 +492,7 @@ void Clipboard::noteOwnWrite() { this->writtenSequence = GetClipboardSequenceNum
 
 void Clipboard::trimHistory() {
 	while (static_cast<qsizetype>(this->storage.size()) > MAX_ENTRIES) {
-		const auto& evicted = this->storage.back();
-		if (evicted.isImage && !evicted.imagePath.isEmpty()) QFile::remove(evicted.imagePath);
+		removeEntryFiles(this->storage.back());
 		this->storage.pop_back();
 	}
 }
@@ -433,53 +517,33 @@ void Clipboard::rebuildEntriesProperty() {
 	this->bEntries = lines;
 }
 
-void Clipboard::writeImageToClipboard(const QImage& imageIn) {
-	auto image = imageIn.convertToFormat(QImage::Format_RGB32);
+void Clipboard::writeData(
+    quint32 format,
+    void* data,
+    std::function<void(Clipboard*)> done,
+    int attempt
+) {
+	if (data == nullptr) return;
 
-	BITMAPINFOHEADER bih {};
-	bih.biSize = sizeof(BITMAPINFOHEADER);
-	bih.biWidth = image.width();
-	bih.biHeight = image.height();
-	bih.biPlanes = 1;
-	bih.biBitCount = 32;
-	bih.biCompression = BI_RGB;
+	auto* window = qs::windows::services::ServiceMessageWindow::instance();
+	if (!OpenClipboard(window->hwnd())) {
+		if (attempt >= WRITE_ATTEMPTS) {
+			qCWarning(logClipboard) << "Couldn't open the clipboard to write";
+			GlobalFree(data);
+			return;
+		}
 
-	auto pixelBytes = static_cast<SIZE_T>(image.width()) * image.height() * 4;
-	auto* mem = GlobalAlloc(GMEM_MOVEABLE, sizeof(BITMAPINFOHEADER) + pixelBytes);
-	if (mem == nullptr) return;
-
-	auto* dst = static_cast<unsigned char*>(GlobalLock(mem));
-	if (dst == nullptr) {
-		GlobalFree(mem);
+		QTimer::singleShot(OPEN_RETRY_MS, this, [this, format, data, done = std::move(done), attempt]() mutable {
+			this->writeData(format, data, std::move(done), attempt + 1);
+		});
 		return;
 	}
 
-	memcpy(dst, &bih, sizeof(bih)); // NOLINT
-	for (int y = 0; y < image.height(); y++) {
-		memcpy( // NOLINT
-		    dst + sizeof(bih) + static_cast<SIZE_T>(y) * image.width() * 4,
-		    image.constScanLine(image.height() - 1 - y),
-		    static_cast<SIZE_T>(image.width()) * 4
-		);
-	}
-	GlobalUnlock(mem);
-	if (SetClipboardData(CF_DIB, mem) == nullptr) GlobalFree(mem);
-}
-
-void Clipboard::writeTextToClipboard(const QString& text) {
-	auto bytes = (text.size() + 1) * sizeof(wchar_t);
-	auto* mem = GlobalAlloc(GMEM_MOVEABLE, bytes);
-	if (mem == nullptr) return;
-
-	auto* dst = GlobalLock(mem);
-	if (dst == nullptr) {
-		GlobalFree(mem);
-		return;
-	}
-
-	memcpy(dst, text.utf16(), bytes); // NOLINT
-	GlobalUnlock(mem);
-	if (SetClipboardData(CF_UNICODETEXT, mem) == nullptr) GlobalFree(mem);
+	EmptyClipboard();
+	if (SetClipboardData(format, data) == nullptr) GlobalFree(data);
+	CloseClipboard();
+	this->noteOwnWrite();
+	if (done) done(this);
 }
 
 void Clipboard::copy(qint64 id) {
@@ -493,46 +557,77 @@ void Clipboard::copy(qint64 id) {
 	this->storage.insert(this->storage.begin(), entry);
 	this->rebuildEntriesProperty();
 
-	auto* window = qs::windows::services::ServiceMessageWindow::instance();
-	if (!openClipboard(window->hwnd(), WRITE_ATTEMPTS)) return;
-	EmptyClipboard();
+	auto* task = QRunnable::create([self = QPointer(this), entry, id]() {
+		void* data = nullptr;
+		quint32 format = 0;
 
-	if (entry.isImage) {
-		QImage image(entry.imagePath);
-		if (!image.isNull()) this->writeImageToClipboard(image);
-	} else {
-		this->writeTextToClipboard(entry.text);
-	}
+		if (entry.isImage) {
+			QImage image(entry.imagePath);
+			if (!image.isNull()) {
+				data = globalFromImage(image);
+				format = CF_DIB;
+			}
+		} else {
+			auto text = entry.textPath.isEmpty() ? entry.text : readTextFile(entry.textPath);
+			if (!text.isEmpty()) {
+				data = globalFromText(text);
+				format = CF_UNICODETEXT;
+			}
+		}
 
-	CloseClipboard();
-	this->noteOwnWrite();
-	this->suppressedSequence = this->writtenSequence;
-	this->suppressNextCaptureFor = id;
+		QMetaObject::invokeMethod(
+		    QCoreApplication::instance(),
+		    [self, format, data, id]() {
+			    if (!self) {
+				    if (data != nullptr) GlobalFree(data);
+				    return;
+			    }
+
+			    self->writeData(format, data, [id](Clipboard* clipboard) {
+				    clipboard->suppressedSequence = clipboard->writtenSequence;
+				    clipboard->suppressNextCaptureFor = id;
+			    });
+		    },
+		    Qt::QueuedConnection
+		);
+	});
+
+	capturePool()->start(task);
 }
 
 bool Clipboard::copyImageFile(const QString& path) {
-	QImage image(path);
-	if (image.isNull()) {
-		qCWarning(logClipboard) << "Cannot load image" << path;
+	QFile file(path);
+	if (!file.open(QIODevice::ReadOnly)) {
+		qCWarning(logClipboard) << "Cannot read image" << path;
 		return false;
 	}
 
-	auto* window = qs::windows::services::ServiceMessageWindow::instance();
-	if (!openClipboard(window->hwnd(), WRITE_ATTEMPTS)) return false;
-	EmptyClipboard();
-	this->writeImageToClipboard(image);
-	CloseClipboard();
-	this->noteOwnWrite();
+	auto bytes = file.readAll();
+	auto* task = QRunnable::create([self = QPointer(this), bytes = std::move(bytes), path]() {
+		auto image = QImage::fromData(bytes);
+		void* data = image.isNull() ? nullptr : globalFromImage(image);
+		if (image.isNull()) qCWarning(logClipboard) << "Cannot load image" << path;
+
+		QMetaObject::invokeMethod(
+		    QCoreApplication::instance(),
+		    [self, data]() {
+			    if (!self) {
+				    if (data != nullptr) GlobalFree(data);
+				    return;
+			    }
+
+			    self->writeData(CF_DIB, data, nullptr);
+		    },
+		    Qt::QueuedConnection
+		);
+	});
+
+	capturePool()->start(task);
 	return true;
 }
 
 void Clipboard::copyText(const QString& text) {
-	auto* window = qs::windows::services::ServiceMessageWindow::instance();
-	if (!openClipboard(window->hwnd(), WRITE_ATTEMPTS)) return;
-	EmptyClipboard();
-	this->writeTextToClipboard(text);
-	CloseClipboard();
-	this->noteOwnWrite();
+	this->writeData(CF_UNICODETEXT, globalFromText(text), nullptr);
 }
 
 void Clipboard::deleteEntry(qint64 id) {
@@ -541,15 +636,13 @@ void Clipboard::deleteEntry(qint64 id) {
 	});
 	if (iter == this->storage.end()) return;
 
-	if (iter->isImage && !iter->imagePath.isEmpty()) QFile::remove(iter->imagePath);
+	removeEntryFiles(*iter);
 	this->storage.erase(iter);
 	this->rebuildEntriesProperty();
 }
 
 void Clipboard::wipe() {
-	for (const auto& entry: this->storage) {
-		if (entry.isImage && !entry.imagePath.isEmpty()) QFile::remove(entry.imagePath);
-	}
+	for (const auto& entry: this->storage) removeEntryFiles(entry);
 	this->storage.clear();
 	this->rebuildEntriesProperty();
 }
