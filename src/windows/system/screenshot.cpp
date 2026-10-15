@@ -6,15 +6,18 @@
 #include <qdatetime.h>
 #include <qdir.h>
 #include <qfileinfo.h>
+#include <qcoreapplication.h>
 #include <qguiapplication.h>
 #include <qimage.h>
 #include <qlist.h>
 #include <qlogging.h>
 #include <qloggingcategory.h>
 #include <qpainter.h>
+#include <qpointer.h>
 #include <qrect.h>
 #include <qscreen.h>
 #include <qstring.h>
+#include <qthreadpool.h>
 #include <qurl.h>
 
 #include "../capture.hpp"
@@ -106,6 +109,100 @@ bool Screenshot::captureScreen(const QString& screenName, const QString& path) {
 
 	this->keepCapture(path, result);
 	return true;
+}
+
+int Screenshot::captureScreenAsync(const QString& screenName, const QString& path) {
+	struct Target {
+		HMONITOR monitor = nullptr;
+		QPoint topLeft;
+		QString name;
+	};
+
+	QList<Target> targets;
+	for (auto* screen: QGuiApplication::screens()) {
+		if (!screenName.isEmpty() && screen->name() != screenName) continue;
+
+		auto* monitor = monitorForScreen(screen);
+		auto rects = monitorRects(monitor);
+		if (monitor == nullptr || !rects.valid) {
+			qCWarning(logScreenshot) << "No monitor for screen" << screen->name();
+			return -1;
+		}
+
+		targets.append({.monitor = monitor, .topLeft = rects.monitor.topLeft(), .name = screen->name()});
+	}
+
+	if (targets.isEmpty()) {
+		qCWarning(logScreenshot) << "No screen named" << screenName;
+		return -1;
+	}
+
+	capture::CaptureThread::instance();
+	auto id = this->nextRequestId++;
+	this->pendingRequests.insert(id);
+
+	QThreadPool::globalInstance()->start([self = QPointer(this), id, targets, path]() {
+		QImage result;
+		QRect bounds;
+		QList<QPair<QPoint, QImage>> shots;
+		auto ok = true;
+
+		for (const auto& target: targets) {
+			auto image = capture::CaptureThread::instance()->grabMonitor(target.monitor, CAPTURE_TIMEOUT_MS);
+			if (image.isNull()) {
+				qCWarning(logScreenshot) << "Capturing" << target.name << "timed out or failed";
+				ok = false;
+				break;
+			}
+
+			bounds = bounds.united(QRect(target.topLeft, image.size()));
+			shots.append({target.topLeft, image});
+		}
+
+		if (ok) {
+			if (shots.size() == 1) {
+				result = shots.first().second;
+			} else {
+				result = QImage(bounds.size(), QImage::Format_RGBX8888);
+				result.fill(Qt::black);
+				QPainter painter(&result);
+				for (const auto& [topLeft, image]: shots) painter.drawImage(topLeft - bounds.topLeft(), image);
+			}
+
+			auto info = QFileInfo(path);
+			if (!QDir().mkpath(info.absolutePath())) {
+				qCWarning(logScreenshot) << "Cannot create" << info.absolutePath();
+				ok = false;
+			} else if (!result.save(path, "PNG", PNG_QUALITY)) {
+				qCWarning(logScreenshot) << "Cannot write" << path;
+				ok = false;
+			}
+		}
+
+		auto* app = QCoreApplication::instance();
+		if (app == nullptr) return;
+
+		QMetaObject::invokeMethod(
+		    app,
+		    [self, id, ok, path, result]() {
+			    if (self) self->finishCaptureRequest(id, ok, path, result);
+		    },
+		    Qt::QueuedConnection
+		);
+	});
+
+	return id;
+}
+
+void Screenshot::finishCaptureRequest(int requestId, bool ok, const QString& path, const QImage& image) {
+	this->pendingRequests.remove(requestId);
+	auto cancelled = this->cancelledRequests.remove(requestId);
+	if (ok && !cancelled) this->keepCapture(path, image);
+	emit this->captureFinished(requestId, ok && !cancelled);
+}
+
+void Screenshot::cancelCapture(int requestId) {
+	if (this->pendingRequests.contains(requestId)) this->cancelledRequests.insert(requestId);
 }
 
 bool Screenshot::cropToFile(

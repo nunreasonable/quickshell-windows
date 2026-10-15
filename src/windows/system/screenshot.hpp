@@ -3,6 +3,7 @@
 #include <qdatetime.h>
 #include <qfileinfo.h>
 #include <qhash.h>
+#include <qset.h>
 #include <qimage.h>
 #include <qobject.h>
 #include <qqmlintegration.h>
@@ -22,6 +23,8 @@ public:
 	explicit Screenshot(QObject* parent = nullptr);
 
 	Q_INVOKABLE bool captureScreen(const QString& screenName, const QString& path);
+	Q_INVOKABLE int captureScreenAsync(const QString& screenName, const QString& path);
+	Q_INVOKABLE void cancelCapture(int requestId);
 
 	Q_INVOKABLE bool
 	cropToFile(const QString& srcPath, int x, int y, int width, int height, const QString& dstPath);
@@ -30,6 +33,9 @@ public:
 	Q_INVOKABLE void releasePixels();
 	Q_INVOKABLE void releaseCapture(const QString& path);
 
+signals:
+	void captureFinished(int requestId, bool ok);
+
 private:
 	struct KeptCapture {
 		QImage image;
@@ -37,6 +43,7 @@ private:
 		qint64 size = -1;
 	};
 
+	void finishCaptureRequest(int requestId, bool ok, const QString& path, const QImage& image);
 	bool loadPixels(const QString& path);
 	void keepCapture(const QString& path, const QImage& image);
 	QImage takeCapture(const QFileInfo& info);
@@ -48,6 +55,9 @@ private:
 
 	QHash<QString, KeptCapture> captures;
 	QTimer capturesExpiry;
+	QSet<int> pendingRequests;
+	QSet<int> cancelledRequests;
+	int nextRequestId = 1;
 };
 
 } // namespace qs::windows::sys
