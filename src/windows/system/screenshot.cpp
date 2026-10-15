@@ -205,6 +205,11 @@ QImage Screenshot::takeCapture(const QFileInfo& info) {
 	return kept.image;
 }
 
+void Screenshot::releaseCapture(const QString& path) {
+	this->captures.remove(QFileInfo(localPath(path)).absoluteFilePath());
+	if (this->captures.isEmpty()) this->capturesExpiry.stop();
+}
+
 void Screenshot::releasePixels() {
 	this->pixels = QImage();
 	this->pixelsPath.clear();

@@ -28,6 +28,7 @@ public:
 
 	Q_INVOKABLE QString pixelAt(const QString& path, int x, int y);
 	Q_INVOKABLE void releasePixels();
+	Q_INVOKABLE void releaseCapture(const QString& path);
 
 private:
 	struct KeptCapture {
