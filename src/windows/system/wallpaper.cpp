@@ -36,6 +36,9 @@ std::atomic<bool> gShuttingDown = false;
 const wchar_t* const kPersonalizeKey =
     L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize";
 const wchar_t* const kDwmKey = L"Software\\Microsoft\\Windows\\DWM";
+const wchar_t* const kContentDeliveryKey =
+    L"Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager";
+const wchar_t* const kLockScreenKey = L"Software\\Microsoft\\Windows\\CurrentVersion\\Lock Screen";
 
 void broadcastSettingChange(const wchar_t* setting) {
 	std::thread([setting] {
@@ -324,6 +327,22 @@ void Wallpaper::applyLockScreenResult(bool ok, const QString& errorMessage) {
 	}
 
 	emit this->lockScreenImageApplied(ok);
+}
+
+QString Wallpaper::lockScreenMode() {
+	DWORD value = 0;
+	if (readDword(HKEY_CURRENT_USER, kContentDeliveryKey, L"RotatingLockScreenEnabled", value)
+	    && value != 0)
+	{
+		return QStringLiteral("spotlight");
+	}
+
+	value = 0;
+	if (readDword(HKEY_CURRENT_USER, kLockScreenKey, L"SlideshowEnabled", value) && value != 0) {
+		return QStringLiteral("slideshow");
+	}
+
+	return QStringLiteral("picture");
 }
 
 void Wallpaper::openLockScreenPersonalizationSettings() { openUri(L"ms-settings:lockscreen"); }

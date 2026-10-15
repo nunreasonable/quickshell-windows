@@ -34,6 +34,8 @@ public:
 
 	Q_INVOKABLE static void openLockScreenPersonalizationSettings();
 
+	Q_INVOKABLE static QString lockScreenMode();
+
 signals:
 	void lockScreenImageSupportedChanged();
 	void lockScreenImageApplied(bool ok);
