@@ -32,6 +32,10 @@
 #include "build.hpp"
 #include "launch_p.hpp"
 
+#ifdef _WIN32
+#include <stdio.h>
+#endif
+
 #if CRASH_HANDLER
 #ifdef _WIN32
 #include "../windows/crash/handler.hpp"
@@ -208,6 +212,8 @@ int launch(const LaunchArgs& args, char** argv) {
 	if (!qEnvironmentVariableIsSet("QT_QPA_PLATFORM")) {
 		qputenv("QT_QPA_PLATFORM", "windows:fontengine=freetype");
 	}
+
+	_setmaxstdio(8192);
 
 	if (pragmas.dropExpensiveFonts) {
 		qWarning() << "DropExpensiveFonts is not supported on Windows, ignoring";
