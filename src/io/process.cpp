@@ -254,6 +254,7 @@ void Process::startDetached() {
 	process.setStandardOutputFile(QProcess::nullDevice());
 	process.setStandardErrorFile(QProcess::nullDevice());
 
+	qs::io::process::disownHandles(&process);
 	process.startDetached();
 }
 

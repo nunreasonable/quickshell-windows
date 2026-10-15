@@ -66,4 +66,6 @@ void setupProcessEnvironment(
     const QHash<QString, QVariant>& envChanges
 );
 
+void disownHandles(QProcess* process);
+
 } // namespace qs::io::process

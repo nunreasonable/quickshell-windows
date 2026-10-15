@@ -7,6 +7,10 @@
 
 #include "../core/common.hpp"
 
+#ifdef _WIN32
+#include <qt_windows.h>
+#endif
+
 namespace qs::io::process {
 
 void setupProcessEnvironment(
@@ -32,6 +36,20 @@ void setupProcessEnvironment(
 	}
 
 	process->setProcessEnvironment(env);
+}
+
+void disownHandles(QProcess* process) {
+#ifdef _WIN32
+	process->setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments* args) {
+		args->inheritHandles = false;
+		args->startupInfo->dwFlags &= ~static_cast<DWORD>(STARTF_USESTDHANDLES);
+		args->startupInfo->hStdInput = nullptr;
+		args->startupInfo->hStdOutput = nullptr;
+		args->startupInfo->hStdError = nullptr;
+	});
+#else
+	Q_UNUSED(process);
+#endif
 }
 
 } // namespace qs::io::process
