@@ -18,7 +18,7 @@ public:
 
 	Q_INVOKABLE static QString currentWallpaper();
 
-	Q_INVOKABLE static bool setWallpaper(const QString& path);
+	Q_INVOKABLE static bool setWallpaper(const QString& path, bool animate = true);
 
 	Q_INVOKABLE static bool isDarkMode();
 

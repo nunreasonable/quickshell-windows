@@ -83,6 +83,21 @@ bool writeDword(HKEY root, const wchar_t* subkey, const wchar_t* name, DWORD val
 	return ok == ERROR_SUCCESS;
 }
 
+bool writeString(HKEY root, const wchar_t* subkey, const wchar_t* name, const wchar_t* value) {
+	HKEY key = nullptr;
+	if (RegCreateKeyExW(root, subkey, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr)
+	    != ERROR_SUCCESS)
+	{
+		return false;
+	}
+
+	auto bytes = static_cast<DWORD>((wcslen(value) + 1) * sizeof(wchar_t));
+	auto ok = RegSetValueExW(key, name, 0, REG_SZ, reinterpret_cast<const BYTE*>(value), bytes);
+
+	RegCloseKey(key);
+	return ok == ERROR_SUCCESS;
+}
+
 bool parseHexColor(const QString& hex, QColor& out) {
 	auto trimmed = hex.startsWith(u'#') ? hex.mid(1) : hex;
 	if (trimmed.length() != 6) return false;
@@ -185,8 +200,25 @@ QString Wallpaper::currentWallpaper() {
 	return {};
 }
 
-bool Wallpaper::setWallpaper(const QString& path) {
+bool Wallpaper::setWallpaper(const QString& path, bool animate) {
 	if (path.isEmpty()) return false;
+
+	auto wpath = QDir::toNativeSeparators(QFileInfo(path).absoluteFilePath()).toStdWString();
+
+	if (!animate) {
+		writeString(HKEY_CURRENT_USER, L"Control Panel\\Desktop", L"WallpaperStyle", L"10");
+		writeString(HKEY_CURRENT_USER, L"Control Panel\\Desktop", L"TileWallpaper", L"0");
+
+		auto ok = SystemParametersInfoW(
+		    SPI_SETDESKWALLPAPER,
+		    0,
+		    const_cast<wchar_t*>(wpath.c_str()),
+		    SPIF_UPDATEINIFILE | SPIF_SENDCHANGE
+		);
+
+		if (ok) return true;
+		qCWarning(logWallpaper) << "SystemParametersInfo(SPI_SETDESKWALLPAPER) failed:" << GetLastError();
+	}
 
 	ComPtr<IDesktopWallpaper> wallpaper;
 	auto hr =
@@ -199,7 +231,6 @@ bool Wallpaper::setWallpaper(const QString& path) {
 
 	wallpaper->SetPosition(DWPOS_FILL);
 
-	auto wpath = QDir::toNativeSeparators(QFileInfo(path).absoluteFilePath()).toStdWString();
 	bool anyOk = false;
 
 	UINT count = 0;
