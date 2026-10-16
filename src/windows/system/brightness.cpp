@@ -48,6 +48,7 @@ QS_LOGGING_CATEGORY(logBrightness, "quickshell.windows.brightness", QtInfoMsg);
 
 constexpr int POOL_STOP_TIMEOUT_MS = 2000;
 constexpr long WMI_WAIT_MS = 5000;
+constexpr long WMI_PROBE_WAIT_MS = 15000;
 constexpr int SETTLE_MS = 1200;
 constexpr int EVENT_ATTEMPTS = 5;
 constexpr DWORD EVENT_RETRY_MS = 5000;
@@ -509,9 +510,13 @@ HRESULT execQuery(IWbemServices* services, const QString& wql, ComPtr<IEnumWbemC
 	return S_OK;
 }
 
-HRESULT nextObject(IEnumWbemClassObject* enumerator, ComPtr<IWbemClassObject>& out) {
+HRESULT nextObject(
+    IEnumWbemClassObject* enumerator,
+    ComPtr<IWbemClassObject>& out,
+    long timeout = WMI_WAIT_MS
+) {
 	ULONG returned = 0;
-	auto hr = enumerator->Next(WMI_WAIT_MS, 1, out.ReleaseAndGetAddressOf(), &returned);
+	auto hr = enumerator->Next(timeout, 1, out.ReleaseAndGetAddressOf(), &returned);
 	if (hr == WBEM_S_TIMEDOUT) return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
 	if (FAILED(hr)) return hr;
 	return returned == 1 && out ? S_OK : S_FALSE;
@@ -581,7 +586,7 @@ HRESULT listWmiPanels(IWbemServices* services, std::vector<WmiPanel>& out) {
 	if (FAILED(hr)) return hr;
 
 	ComPtr<IWbemClassObject> object;
-	while ((hr = nextObject(enumerator.Get(), object)) == S_OK) {
+	while ((hr = nextObject(enumerator.Get(), object, WMI_PROBE_WAIT_MS)) == S_OK) {
 		WmiPanel panel;
 		panel.instanceName = stringProperty(object.Get(), L"InstanceName");
 		panel.active = boolProperty(object.Get(), L"Active", true);
@@ -598,7 +603,7 @@ HRESULT listWmiPanels(IWbemServices* services, std::vector<WmiPanel>& out) {
 		return S_OK;
 	}
 
-	while (nextObject(enumerator.Get(), object) == S_OK) {
+	while (nextObject(enumerator.Get(), object, WMI_PROBE_WAIT_MS) == S_OK) {
 		auto name = stringProperty(object.Get(), L"InstanceName");
 		auto path = stringProperty(object.Get(), L"__RELPATH");
 		if (name.isEmpty() || path.isEmpty()) continue;
