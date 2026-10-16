@@ -1,34 +1,54 @@
+#include <algorithm>
 #include <cmath>
+#include <memory>
 #include <optional>
+#include <set>
 
 #include <qbytearray.h>
+#include <qcolor.h>
 #include <qfile.h>
+#include <qimage.h>
 #include <qmatrix4x4.h>
 #include <qnamespace.h>
 #include <qobject.h>
 #include <qpoint.h>
+#include <qpointer.h>
+#include <qprocess.h>
 #include <qqmlcomponent.h>
 #include <qqmlengine.h>
 #include <qquickitem.h>
 #include <qquickwindow.h>
 #include <qrect.h>
+#include <qregularexpression.h>
+#include <qsgrendererinterface.h>
+#include <qsignalspy.h>
 #include <qsize.h>
 #include <qstring.h>
 #include <qstringlist.h>
+#include <qtemporarydir.h>
 #include <qtenvironmentvariables.h>
 #include <qtest.h>
 #include <qtestcase.h>
 #include <qurl.h>
+#include <qvectornd.h>
+#include <rhi/qshader.h>
 
 #include "layer_rules.hpp"
 #include "panel_animation.hpp"
+#include "panel_effects.hpp"
 
 using qs::windows::CubicBezier;
 using qs::windows::LayerRules;
 using qs::windows::PanelAnimation;
 using qs::windows::PanelAnimationStyle;
 using qs::windows::PanelAnimationTiming;
+using qs::windows::PanelCascadeTiming;
 using qs::windows::PanelContentTransform;
+using qs::windows::PanelEffect;
+using qs::windows::PanelEffectFrame;
+using qs::windows::PanelEffectKeepAlive;
+using qs::windows::PanelEffects;
+using qs::windows::SpringCurve;
 using Kind = qs::windows::PanelAnimationStyle::Kind;
 
 namespace {
@@ -68,6 +88,92 @@ PanelAnimationStyle style(Kind kind, std::optional<Qt::Edge> edge = std::nullopt
 	return result;
 }
 
+QString name(PanelEffect effect) { return qs::windows::panelEffectName(effect); }
+
+qreal roundedBoxDistance(const QPointF& point, const QRectF& rect, qreal radius) {
+	auto center = rect.center();
+	auto qx = std::abs(point.x() - center.x()) - rect.width() / 2.0 + radius;
+	auto qy = std::abs(point.y() - center.y()) - rect.height() / 2.0 + radius;
+	auto outside = std::hypot(std::max(qx, 0.0), std::max(qy, 0.0));
+	return outside + std::min(std::max(qx, qy), 0.0) - radius;
+}
+
+template <typename T>
+T* findObject(QObject* root, const char* objectName) {
+	return root->findChild<T*>(QString::fromLatin1(objectName));
+}
+
+QStringList objectNames(const QList<QQuickItem*>& items) {
+	QStringList names;
+	for (const auto* item: items) names.append(item->objectName());
+	return names;
+}
+
+struct QmlScene {
+	QQmlEngine engine;
+	std::unique_ptr<QObject> root;
+
+	bool load(const QByteArray& qml) {
+		auto component = QQmlComponent(&this->engine);
+		component.setData(qml, QUrl());
+		this->root.reset(component.create());
+		if (this->root == nullptr) qWarning().noquote() << component.errorString();
+		return this->root != nullptr;
+	}
+};
+
+const auto EFFECT_WINDOW_QML = QByteArray(R"(
+	import QtQuick
+	import QtQuick.Window
+	Window {
+		width: 64
+		height: 48
+		visible: true
+		color: "transparent"
+		property Item content: content
+		Item {
+			id: content
+			anchors.fill: parent
+			Rectangle { x: 4; y: 4; width: 24; height: 40; color: "#ff2050" }
+			Rectangle { x: 34; y: 8; width: 26; height: 30; radius: 6; color: "#20a0ff" }
+			Rectangle { x: 10; y: 30; width: 40; height: 12; color: "#40ff60"; opacity: 0.6 }
+		}
+	}
+)");
+
+int maxChannelDifference(const QImage& a, const QImage& b) {
+	auto first = a.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+	auto second = b.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+	if (first.size() != second.size()) return 256;
+
+	auto worst = 0;
+	for (auto y = 0; y < first.height(); y++) {
+		for (auto x = 0; x < first.width(); x++) {
+			auto pa = first.pixel(x, y);
+			auto pb = second.pixel(x, y);
+			worst = std::max(
+			    {worst,
+			     std::abs(qRed(pa) - qRed(pb)),
+			     std::abs(qGreen(pa) - qGreen(pb)),
+			     std::abs(qBlue(pa) - qBlue(pb)),
+			     std::abs(qAlpha(pa) - qAlpha(pb))}
+			);
+		}
+	}
+
+	return worst;
+}
+
+qreal alphaSum(const QImage& image, const QRect& area = QRect()) {
+	auto converted = image.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+	auto rect = area.isNull() ? converted.rect() : area.intersected(converted.rect());
+	auto sum = 0.0;
+	for (auto y = rect.top(); y <= rect.bottom(); y++) {
+		for (auto x = rect.left(); x <= rect.right(); x++) sum += qAlpha(converted.pixel(x, y));
+	}
+	return sum;
+}
+
 } // namespace
 
 class TestPanelAnimation: public QObject {
@@ -87,6 +193,26 @@ private slots:
 	void overlayFollowsRoot();
 	void ruleMerging();
 	void iiRules();
+	void springCurve();
+	void springOvershootLimits();
+	void effectNames();
+	void effectResolution();
+	void expressiveRules();
+	void expressiveTimeline();
+	void expressiveReverse();
+	void revealShape();
+	void blurAndDissolveFrames();
+	void cascadeTiming();
+	void cascadeAcrossReversal();
+	void cascadeSections();
+	void cascadeBypass();
+	void keepAlive();
+	void effectLifecycle();
+	void effectEngineGone();
+	void missingShader();
+	void shaderReflection();
+	void shaderUpToDate();
+	void effectRendering();
 };
 
 void TestPanelAnimation::parseStyles() {
@@ -599,6 +725,1053 @@ void TestPanelAnimation::iiRules() {
 	QCOMPARE(rules.ruleFor("quickshell:wTaskView").ignoreAlpha, std::optional<qreal>(0));
 	QCOMPARE(rules.ruleFor("quickshell:popup").ignoreAlpha, std::optional<qreal>(1));
 	QCOMPARE(rules.ruleFor("bar0").ignoreAlpha, std::optional<qreal>(0.6));
+
+	struct ExpectEffect {
+		const char* ns;
+		PanelEffect effect;
+	};
+
+	const auto effects = {
+	    ExpectEffect {"quickshell:sidebarRight", PanelEffect::Cascade},
+	    ExpectEffect {"quickshell:sidebarLeft", PanelEffect::Cascade},
+	    ExpectEffect {"quickshell:bar", PanelEffect::Cascade},
+	    ExpectEffect {"quickshell:verticalBar", PanelEffect::Cascade},
+	    ExpectEffect {"quickshell:reloadPopup", PanelEffect::Cascade},
+	    ExpectEffect {"quickshell:dock", PanelEffect::Reveal},
+	    ExpectEffect {"quickshell:cheatsheet", PanelEffect::Reveal},
+	    ExpectEffect {"quickshell:osk", PanelEffect::Reveal},
+	    ExpectEffect {"quickshell:wallpaperSelector", PanelEffect::Reveal},
+	    ExpectEffect {"quickshell:screenCorners", PanelEffect::Blur},
+	    ExpectEffect {"quickshell:notificationPopup", PanelEffect::Dissolve},
+	    ExpectEffect {"quickshell:overview", PanelEffect::Standard},
+	    ExpectEffect {"quickshell:session", PanelEffect::Standard},
+	    ExpectEffect {"quickshell:background", PanelEffect::Standard},
+	};
+
+	for (const auto& expect: effects) {
+		auto rule = rules.ruleFor(expect.ns);
+		auto got = qs::windows::resolvePanelEffect(rule.animation, rule.effect);
+		auto message = QString("%1: %2, want %3").arg(expect.ns, name(got), name(expect.effect));
+		QVERIFY2(got == expect.effect, qPrintable(message));
+	}
+}
+
+void TestPanelAnimation::springCurve() {
+	for (auto overshoot: {0.0, 0.005, 0.013, 0.03, 0.06, 0.1}) {
+		auto spring = SpringCurve::withOvershoot(overshoot);
+		QCOMPARE(spring.valueAt(0), 0.0);
+		QCOMPARE(spring.valueAt(1), 1.0);
+		QCOMPARE(spring.valueAt(-0.5), 0.0);
+		QCOMPARE(spring.valueAt(1.5), 1.0);
+
+		auto peak = 0.0;
+		auto peakAt = 0.0;
+		for (auto i = 1; i < 2000; i++) {
+			auto progress = i / 2000.0;
+			auto value = spring.valueAt(progress);
+			if (value > peak) {
+				peak = value;
+				peakAt = progress;
+			}
+		}
+
+		auto previous = 0.0;
+		for (auto i = 1; i < 2000 && i / 2000.0 <= peakAt; i++) {
+			auto value = spring.valueAt(i / 2000.0);
+			auto dip = QString("overshoot %1 dips at %2").arg(overshoot).arg(i);
+			QVERIFY2(value >= previous, qPrintable(dip));
+			previous = value;
+		}
+
+		for (auto i = 0; i <= 100; i++) {
+			auto progress = 0.9 + i / 1000.0;
+			QVERIFY2(
+			    std::abs(spring.valueAt(progress) - 1.0) < 0.004,
+			    qPrintable(QString("overshoot %1 has not settled at %2").arg(overshoot).arg(progress))
+			);
+		}
+
+		if (overshoot == 0) {
+			QCOMPARE(spring.dampingRatio(), 1.0);
+			QVERIFY(peak <= 1.0 + 1e-9);
+		} else {
+			auto message = QString("overshoot %1 peaks at %2 (at %3)")
+			                   .arg(overshoot)
+			                   .arg(peak - 1)
+			                   .arg(peakAt);
+			QVERIFY2(near(peak - 1.0, overshoot, 0.002 + overshoot * 0.02), qPrintable(message));
+			QVERIFY2(peakAt > 0.15 && peakAt < 0.85, qPrintable(message));
+			QVERIFY(spring.dampingRatio() > 0 && spring.dampingRatio() < 1);
+		}
+	}
+
+	QVERIFY(near(SpringCurve::withOvershoot(0.06).dampingRatio(), 0.667, 1e-3));
+	QCOMPARE(SpringCurve::withOvershoot(-1).dampingRatio(), 1.0);
+	QVERIFY(SpringCurve::withOvershoot(5).dampingRatio() > 0.35);
+
+	auto linear = SpringCurve();
+	QCOMPARE(linear.valueAt(0.25), 0.25);
+}
+
+void TestPanelAnimation::springOvershootLimits() {
+	using qs::windows::panelSpringOvershoot;
+
+	auto sidebar = QSizeF(460, 1080);
+	auto right = style(Kind::Slide, Qt::RightEdge);
+	auto sidebarOvershoot = panelSpringOvershoot(right, PanelEffect::Cascade, Qt::RightEdge, sidebar);
+	QVERIFY(sidebarOvershoot > 0);
+	QVERIFY(sidebarOvershoot * sidebar.width() <= 6 + 1e-9);
+
+	auto bar = QSizeF(1920, 45);
+	QCOMPARE(panelSpringOvershoot(style(Kind::Slide), PanelEffect::Cascade, Qt::TopEdge, bar), 0.06);
+
+	auto selector = QSizeF(1200, 400);
+	QCOMPARE(qs::windows::panelRevealTravel(Qt::TopEdge, selector), 48.0);
+	QCOMPARE(qs::windows::panelRevealTravel(Qt::BottomEdge, QSizeF(1920, 60)), 12.0);
+	QCOMPARE(qs::windows::panelRevealTravel(Qt::BottomEdge, QSizeF(100, 8)), 8.0);
+	auto top = style(Kind::Slide, Qt::TopEdge);
+	QCOMPARE(panelSpringOvershoot(top, PanelEffect::Reveal, Qt::TopEdge, selector), 0.06);
+
+	auto grow = style(Kind::Popin, std::nullopt, 0.93);
+	auto growOvershoot = panelSpringOvershoot(grow, PanelEffect::Blur, Qt::TopEdge, QSizeF(800, 600));
+	QVERIFY(growOvershoot > 0);
+	QVERIFY(growOvershoot * 0.07 * 400 <= 6 + 1e-9);
+
+	auto shrink = style(Kind::Popin, std::nullopt, 1.2);
+	QCOMPARE(panelSpringOvershoot(shrink, PanelEffect::Blur, Qt::TopEdge, QSizeF(30, 30)), 0.0);
+	QCOMPARE(
+	    panelSpringOvershoot(style(Kind::Fade), PanelEffect::Dissolve, Qt::TopEdge, QSizeF(400, 800)),
+	    0.0
+	);
+
+	auto timing = PanelAnimationTiming::expressive(PanelEffect::Cascade, sidebarOvershoot);
+	auto animation = PanelAnimation();
+	animation.jumpTo(false);
+	animation.start(true, right, timing);
+
+	auto furthest = 0.0;
+	for (auto elapsed = 0.0; elapsed <= animation.duration(); elapsed += 1) {
+		animation.advance(elapsed);
+		auto frame = qs::windows::panelAnimationFrame(
+		    right,
+		    Qt::RightEdge,
+		    sidebar,
+		    animation.motion(),
+		    animation.opacity(),
+		    1
+		);
+		furthest = std::min(furthest, frame.offset.x());
+	}
+
+	QVERIFY2(furthest < 0, "the sidebar should overshoot a little");
+	QVERIFY2(furthest >= -6.5, qPrintable(QString("overshoot of %1 px").arg(-furthest)));
+}
+
+void TestPanelAnimation::effectNames() {
+	const auto all = {
+	    PanelEffect::Auto,
+	    PanelEffect::Standard,
+	    PanelEffect::Spring,
+	    PanelEffect::Cascade,
+	    PanelEffect::Reveal,
+	    PanelEffect::Blur,
+	    PanelEffect::Dissolve,
+	};
+
+	for (auto effect: all) {
+		auto parsed = qs::windows::parsePanelEffect(name(effect));
+		QVERIFY(parsed.has_value());
+		QCOMPARE(name(*parsed), name(effect));
+	}
+
+	QCOMPARE(name(*qs::windows::parsePanelEffect(" Reveal ")), QString("reveal"));
+	QVERIFY(!qs::windows::parsePanelEffect("sparkle").has_value());
+	QVERIFY(!qs::windows::parsePanelEffect("").has_value());
+}
+
+void TestPanelAnimation::effectResolution() {
+	using qs::windows::panelEffectUsesShader;
+	using qs::windows::resolvePanelEffect;
+
+	QCOMPARE(name(resolvePanelEffect(style(Kind::Slide), PanelEffect::Auto)), QString("cascade"));
+	QCOMPARE(
+	    name(resolvePanelEffect(style(Kind::Slide, Qt::LeftEdge), PanelEffect::Auto)),
+	    QString("cascade")
+	);
+	QCOMPARE(
+	    name(resolvePanelEffect(style(Kind::Slide, Qt::RightEdge), PanelEffect::Auto)),
+	    QString("cascade")
+	);
+	QCOMPARE(
+	    name(resolvePanelEffect(style(Kind::Slide, Qt::TopEdge), PanelEffect::Auto)),
+	    QString("reveal")
+	);
+	QCOMPARE(
+	    name(resolvePanelEffect(style(Kind::Slide, Qt::BottomEdge), PanelEffect::Auto)),
+	    QString("reveal")
+	);
+	QCOMPARE(
+	    name(resolvePanelEffect(style(Kind::Popin, std::nullopt, 0.93), PanelEffect::Auto)),
+	    QString("blur")
+	);
+	QCOMPARE(name(resolvePanelEffect(style(Kind::Fade), PanelEffect::Auto)), QString("dissolve"));
+	QCOMPARE(name(resolvePanelEffect(style(Kind::None), PanelEffect::Auto)), QString("standard"));
+	QCOMPARE(name(resolvePanelEffect(style(Kind::None), PanelEffect::Dissolve)), QString("standard"));
+	QCOMPARE(
+	    name(resolvePanelEffect(style(Kind::Slide), PanelEffect::Dissolve)),
+	    QString("dissolve")
+	);
+	QCOMPARE(name(resolvePanelEffect(style(Kind::Fade), PanelEffect::Standard)), QString("standard"));
+
+	QVERIFY(panelEffectUsesShader(PanelEffect::Reveal));
+	QVERIFY(panelEffectUsesShader(PanelEffect::Blur));
+	QVERIFY(panelEffectUsesShader(PanelEffect::Dissolve));
+	QVERIFY(!panelEffectUsesShader(PanelEffect::Cascade));
+	QVERIFY(!panelEffectUsesShader(PanelEffect::Spring));
+	QVERIFY(!panelEffectUsesShader(PanelEffect::Standard));
+	QVERIFY(!panelEffectUsesShader(PanelEffect::Auto));
+}
+
+void TestPanelAnimation::expressiveRules() {
+	auto data = QByteArray(R"({
+		"rules": [
+			{"namespace": ".*", "animation": "popin 93%", "expressive": "dissolve"},
+			{"namespace": "quickshell:.*", "expressive": "blur"},
+			{"namespace": "quickshell:bar", "animation": "slide", "expressive": null},
+			{"namespace": "quickshell:dock", "expressive": "STANDARD"},
+			{"namespace": "quickshell:bad", "expressive": "sparkle"},
+			{"namespace": "quickshell:number", "expressive": 3}
+		]
+	})");
+
+	auto warnings = QStringList();
+	auto rules = LayerRules::parse(data, "expressive.json", &warnings);
+	QVERIFY(rules.valid());
+	QCOMPARE(rules.size(), qsizetype(6));
+	QCOMPARE(warnings.size(), qsizetype(2));
+
+	QCOMPARE(name(rules.ruleFor("other").effect), QString("dissolve"));
+	QCOMPARE(name(rules.ruleFor("quickshell:x").effect), QString("blur"));
+	QCOMPARE(name(rules.ruleFor("quickshell:bar").effect), QString("auto"));
+	QCOMPARE(rules.ruleFor("quickshell:bar").animation, style(Kind::Slide));
+	QCOMPARE(name(rules.ruleFor("quickshell:dock").effect), QString("standard"));
+	QCOMPARE(name(rules.ruleFor("quickshell:bad").effect), QString("blur"));
+	QCOMPARE(name(rules.ruleFor("quickshell:number").effect), QString("blur"));
+
+	auto info = rules.info();
+	QCOMPARE(info.at(0).toMap().value("expressive").toString(), QString("dissolve"));
+	QCOMPARE(info.at(2).toMap().value("expressive").toString(), QString("auto"));
+	QCOMPARE(info.at(3).toMap().value("expressive").toString(), QString("standard"));
+	QVERIFY(!info.at(4).toMap().contains("expressive"));
+
+	auto plainData = QByteArray(R"({"rules": [{"namespace": "a", "animation": "fade"}]})");
+	auto plain = LayerRules::parse(plainData, "plain.json");
+	QCOMPARE(name(plain.ruleFor("a").effect), QString("auto"));
+	QCOMPARE(name(LayerRules().ruleFor("a").effect), QString("auto"));
+}
+
+void TestPanelAnimation::expressiveTimeline() {
+	struct Case {
+		PanelEffect effect;
+		PanelAnimationStyle style;
+	};
+
+	const auto cases = {
+	    Case {PanelEffect::Cascade, style(Kind::Slide, Qt::RightEdge)},
+	    Case {PanelEffect::Spring, style(Kind::Slide, Qt::LeftEdge)},
+	    Case {PanelEffect::Reveal, style(Kind::Slide, Qt::TopEdge)},
+	    Case {PanelEffect::Blur, style(Kind::Popin, std::nullopt, 0.93)},
+	    Case {PanelEffect::Dissolve, style(Kind::Fade)},
+	};
+
+	for (const auto& test: cases) {
+		auto timing = PanelAnimationTiming::expressive(test.effect, 0.03);
+		auto label = name(test.effect);
+		auto animation = PanelAnimation();
+		animation.jumpTo(false);
+
+		animation.start(true, test.style, timing);
+		auto showMs = animation.duration();
+		QVERIFY2(showMs >= 320 && showMs <= 420, qPrintable(label + QString(" in %1").arg(showMs)));
+		QVERIFY(!animation.advance(0));
+		QCOMPARE(animation.opacity(), 0.0);
+		QCOMPARE(animation.motion(), test.style.moves() ? 0.0 : 1.0);
+		QCOMPARE(animation.effect(), qs::windows::panelEffectUsesShader(test.effect) ? 0.0 : 1.0);
+
+		for (auto elapsed = 0.0; elapsed < showMs; elapsed += 5) {
+			animation.advance(elapsed);
+			QVERIFY(animation.motion() >= 0 && animation.motion() <= 1.1);
+			QVERIFY(animation.opacity() >= 0 && animation.opacity() <= 1);
+			QVERIFY(animation.effect() >= 0 && animation.effect() <= 1);
+		}
+
+		QVERIFY(animation.advance(showMs));
+		QVERIFY(animation.settled());
+		QCOMPARE(animation.effect(), 1.0);
+
+		animation.start(false, test.style, timing);
+		auto hideMs = animation.duration();
+		QVERIFY2(hideMs >= 200 && hideMs <= 260, qPrintable(label + QString(" out %1").arg(hideMs)));
+		QVERIFY(!animation.advance(hideMs / 2));
+		QVERIFY(animation.advance(hideMs));
+		QVERIFY(animation.settled());
+		QVERIFY(!animation.showing());
+		QCOMPARE(animation.opacity(), 0.0);
+		QCOMPARE(animation.effect(), 0.0);
+	}
+
+	auto standard = PanelAnimationTiming::hyprland();
+	QCOMPARE(standard.showEffectMs, 0.0);
+	QVERIFY(!standard.showSpring.has_value());
+}
+
+void TestPanelAnimation::expressiveReverse() {
+	auto slide = style(Kind::Slide, Qt::RightEdge);
+	auto timing = PanelAnimationTiming::expressive(PanelEffect::Cascade, 0.06);
+	auto animation = PanelAnimation();
+	animation.jumpTo(false);
+	animation.start(true, slide, timing);
+
+	auto peak = 0.0;
+	auto peakAt = 0.0;
+	for (auto elapsed = 0.0; elapsed < animation.duration(); elapsed += 1) {
+		animation.advance(elapsed);
+		if (animation.motion() > peak) {
+			peak = animation.motion();
+			peakAt = elapsed;
+		}
+	}
+
+	QVERIFY(peak > 1.0);
+	animation.jumpTo(false);
+	animation.start(true, slide, timing);
+	animation.advance(peakAt);
+	auto motion = animation.motion();
+	auto opacity = animation.opacity();
+	QVERIFY(motion > 1.0);
+
+	animation.start(false, slide, timing);
+	QVERIFY(!animation.advance(0));
+	QCOMPARE(animation.motion(), motion);
+	QCOMPARE(animation.opacity(), opacity);
+	QVERIFY(near(animation.duration(), timing.hideMotionMs * motion, 1e-6));
+
+	animation.advance(60);
+	auto closing = animation.motion();
+	QVERIFY(closing < motion);
+
+	animation.start(true, slide, timing);
+	QVERIFY(!animation.advance(0));
+	QCOMPARE(animation.motion(), closing);
+	QVERIFY(near(animation.duration(), timing.showMotionMs * std::abs(1 - closing), 1e-6));
+	QVERIFY(animation.advance(animation.duration()));
+	QVERIFY(animation.settled());
+
+	auto reveal = PanelAnimationTiming::expressive(PanelEffect::Reveal, 0.06);
+	auto top = style(Kind::Slide, Qt::TopEdge);
+	animation.jumpTo(false);
+	animation.start(true, top, reveal);
+	animation.advance(120);
+	auto effect = animation.effect();
+	QVERIFY(effect > 0 && effect < 1);
+	animation.start(false, top, reveal);
+	animation.advance(0);
+	QCOMPARE(animation.effect(), effect);
+	auto expected = std::max(
+	    {reveal.hideMotionMs * animation.motion(),
+	     reveal.hideEffectMs * effect,
+	     reveal.hideFadeMs * animation.opacity()}
+	);
+	QVERIFY(near(animation.duration(), expected, 1e-6));
+}
+
+void TestPanelAnimation::revealShape() {
+	using qs::windows::panelEffectFrame;
+	auto size = QSizeF(1200, 400);
+	auto window = QRectF(QPointF(), size);
+	const auto edges = {Qt::TopEdge, Qt::BottomEdge, Qt::LeftEdge, Qt::RightEdge};
+
+	for (auto edge: edges) {
+		auto hidden = panelEffectFrame(PanelEffect::Reveal, edge, size, 0, QPointF());
+		QVERIFY(hidden.revealRadius >= 0);
+		QVERIFY(hidden.revealRect.intersected(window).isEmpty());
+
+		auto shown = panelEffectFrame(PanelEffect::Reveal, edge, size, 1, QPointF());
+		QVERIFY(shown.revealRadius > 0);
+		for (auto y = 0.5; y < size.height(); y += 13) {
+			for (auto x = 0.5; x < size.width(); x += 17) {
+				QVERIFY(roundedBoxDistance({x, y}, shown.revealRect, shown.revealRadius) <= -0.5);
+			}
+		}
+
+		const auto corners =
+		    {window.topLeft(), window.topRight(), window.bottomLeft(), window.bottomRight()};
+		for (const auto& corner: corners) {
+			QVERIFY(roundedBoxDistance(corner, shown.revealRect, shown.revealRadius) <= -0.5);
+		}
+
+		auto previous = 0.0;
+		for (auto i = 0; i <= 20; i++) {
+			auto frame = panelEffectFrame(PanelEffect::Reveal, edge, size, i / 20.0, QPointF());
+			auto covered = frame.revealRect.intersected(window);
+			auto area = covered.isEmpty() ? 0.0 : covered.width() * covered.height();
+			QVERIFY(area >= previous);
+			previous = area;
+			QVERIFY(frame.revealRadius <= frame.revealRect.width() / 2 + 1e-9);
+			QVERIFY(frame.revealRadius <= frame.revealRect.height() / 2 + 1e-9);
+		}
+
+		auto offset = QPointF();
+		if (edge == Qt::LeftEdge) offset.setX(-20);
+		if (edge == Qt::RightEdge) offset.setX(20);
+		if (edge == Qt::TopEdge) offset.setY(-20);
+		if (edge == Qt::BottomEdge) offset.setY(20);
+		auto moved = panelEffectFrame(PanelEffect::Reveal, edge, size, 0.5, offset);
+		auto still = panelEffectFrame(PanelEffect::Reveal, edge, size, 0.5, QPointF());
+		QCOMPARE(moved.revealRect, still.revealRect.translated(-offset));
+		QCOMPARE(moved.revealRadius, still.revealRadius);
+	}
+
+	auto half = panelEffectFrame(PanelEffect::Reveal, Qt::TopEdge, size, 0.5, QPointF());
+	QVERIFY(roundedBoxDistance({600, 10}, half.revealRect, half.revealRadius) < 0);
+	QVERIFY(roundedBoxDistance({600, 390}, half.revealRect, half.revealRadius) > 0);
+	QVERIFY(roundedBoxDistance({5, 5}, half.revealRect, half.revealRadius) > 0);
+
+	auto bottom = panelEffectFrame(PanelEffect::Reveal, Qt::BottomEdge, size, 0.5, QPointF());
+	QVERIFY(roundedBoxDistance({600, 390}, bottom.revealRect, bottom.revealRadius) < 0);
+	QVERIFY(roundedBoxDistance({600, 10}, bottom.revealRect, bottom.revealRadius) > 0);
+}
+
+void TestPanelAnimation::blurAndDissolveFrames() {
+	using qs::windows::panelBlurSampling;
+	using qs::windows::panelEffectFrame;
+
+	auto large = QSizeF(800, 600);
+	QCOMPARE(panelEffectFrame(PanelEffect::Blur, Qt::TopEdge, large, 0, QPointF()).blurRadius, 14.0);
+	auto small = panelEffectFrame(PanelEffect::Blur, Qt::TopEdge, QSizeF(30, 30), 0, QPointF());
+	QCOMPARE(small.blurRadius, 4.0);
+	QCOMPARE(panelEffectFrame(PanelEffect::Blur, Qt::TopEdge, large, 1, QPointF()).blurRadius, 0.0);
+
+	auto previous = 15.0;
+	for (auto i = 0; i <= 10; i++) {
+		auto frame = panelEffectFrame(PanelEffect::Blur, Qt::TopEdge, large, i / 10.0, QPointF());
+		QVERIFY(frame.blurRadius <= previous);
+		QCOMPARE(frame.dissolve, 1.0);
+		QVERIFY(frame.revealRadius < 0);
+		previous = frame.blurRadius;
+	}
+
+	auto none = panelBlurSampling(0, large, 1);
+	QVERIFY(none.step.isNull());
+	QCOMPARE(none.lod, 0.0);
+	QVERIFY(panelBlurSampling(0.2, large, 1).step.isNull());
+
+	auto sharp = panelBlurSampling(14, large, 1);
+	QVERIFY(near(sharp.step.x(), 7.0 / 800, 1e-12));
+	QVERIFY(near(sharp.step.y(), 7.0 / 600, 1e-12));
+	QVERIFY(near(sharp.lod, std::log2(7.0), 1e-9));
+	QVERIFY(near(panelBlurSampling(14, large, 2).lod, std::log2(14.0), 1e-9));
+	QCOMPARE(panelBlurSampling(1, large, 1).lod, 0.0);
+
+	auto dissolveAt = [&large](qreal progress) {
+		auto frame = panelEffectFrame(PanelEffect::Dissolve, Qt::TopEdge, large, progress, QPointF());
+		return frame.dissolve;
+	};
+
+	QCOMPARE(dissolveAt(0), 0.0);
+	QCOMPARE(dissolveAt(0.4), 0.4);
+	QCOMPARE(dissolveAt(1.2), 1.0);
+
+	for (auto effect: {PanelEffect::Cascade, PanelEffect::Spring, PanelEffect::Standard}) {
+		auto frame = panelEffectFrame(effect, Qt::TopEdge, large, 0, QPointF());
+		QCOMPARE(frame.blurRadius, 0.0);
+		QCOMPARE(frame.dissolve, 1.0);
+		QVERIFY(frame.revealRadius < 0);
+	}
+}
+
+void TestPanelAnimation::cascadeTiming() {
+	using qs::windows::panelCascadeDistance;
+	using qs::windows::panelCascadeFrame;
+
+	const auto& timing = PanelCascadeTiming::expressive();
+	QVERIFY(timing.stepMs >= 20 && timing.stepMs <= 30);
+	QCOMPARE(timing.delayFor(-1), 0.0);
+	QCOMPARE(timing.delayFor(0), 0.0);
+	QCOMPARE(timing.delayFor(1), timing.stepMs);
+	QCOMPARE(timing.delayFor(5), 120.0);
+	QCOMPARE(timing.delayFor(9), 120.0);
+	QCOMPARE(timing.durationFor(0), 0.0);
+	QCOMPARE(timing.durationFor(1), timing.sectionMs);
+	QCOMPARE(timing.durationFor(6), 400.0);
+	QCOMPARE(timing.durationFor(12), 400.0);
+
+	QCOMPARE(panelCascadeDistance(Qt::RightEdge, QSizeF(460, 1080)), 36.0);
+	QCOMPARE(panelCascadeDistance(Qt::TopEdge, QSizeF(1920, 45)), 16.0);
+	QCOMPARE(panelCascadeDistance(Qt::LeftEdge, QSizeF(300, 1080)), 24.0);
+	QCOMPARE(qs::windows::panelCascadeOvershoot(36), 0.1);
+	QCOMPARE(qs::windows::panelCascadeOvershoot(80), 0.05);
+
+	auto spring = SpringCurve::withOvershoot(qs::windows::panelCascadeOvershoot(36));
+	auto start = panelCascadeFrame(timing, spring, 0, 0, Qt::RightEdge, 36, 1);
+	QCOMPARE(start.offset, QPointF(36, 0));
+	QVERIFY(start.opacity > 0 && start.opacity < 0.01);
+
+	auto waiting = panelCascadeFrame(timing, spring, 3, 50, Qt::RightEdge, 36, 1);
+	QCOMPARE(waiting.offset, QPointF(36, 0));
+	QCOMPARE(waiting.opacity, start.opacity);
+
+	auto done = panelCascadeFrame(timing, spring, 5, 400, Qt::RightEdge, 36, 1);
+	QCOMPARE(done.offset, QPointF(0, 0));
+	QCOMPARE(done.opacity, 1.0);
+
+	QCOMPARE(panelCascadeFrame(timing, spring, 0, 0, Qt::LeftEdge, 36, 1).offset, QPointF(-36, 0));
+	QCOMPARE(panelCascadeFrame(timing, spring, 0, 0, Qt::TopEdge, 16, 1).offset, QPointF(0, -16));
+	QCOMPARE(panelCascadeFrame(timing, spring, 0, 0, Qt::BottomEdge, 16, 1).offset, QPointF(0, 16));
+
+	for (auto index = 0; index < 6; index++) {
+		auto previousOpacity = 0.0;
+		auto furthest = 0.0;
+
+		for (auto elapsed = 0.0; elapsed <= 420; elapsed += 2) {
+			auto frame = panelCascadeFrame(timing, spring, index, elapsed, Qt::RightEdge, 36, 1);
+			QVERIFY(frame.opacity >= previousOpacity);
+			QVERIFY(frame.opacity > 0);
+			previousOpacity = frame.opacity;
+			furthest = std::min(furthest, frame.offset.x());
+			if (elapsed < timing.delayFor(index)) QCOMPARE(frame.offset.x(), 36.0);
+		}
+
+		auto message = QString("section %1 overshoots %2 px").arg(index).arg(-furthest);
+		QVERIFY2(furthest >= -4.5, qPrintable(message));
+	}
+
+	auto later = panelCascadeFrame(timing, spring, 1, 60, Qt::RightEdge, 36, 1);
+	auto earlier = panelCascadeFrame(timing, spring, 0, 60, Qt::RightEdge, 36, 1);
+	QVERIFY(later.offset.x() > earlier.offset.x());
+	QVERIFY(later.opacity < earlier.opacity);
+
+	auto fractional = panelCascadeFrame(timing, spring, 0, 40, Qt::BottomEdge, 36, 1.5);
+	QVERIFY(near(fractional.offset.y() * 1.5, std::round(fractional.offset.y() * 1.5), 1e-9));
+}
+
+void TestPanelAnimation::cascadeAcrossReversal() {
+	auto slide = style(Kind::Slide, Qt::RightEdge);
+	auto timing = PanelAnimationTiming::expressive(PanelEffect::Cascade, 0.01);
+	auto animation = PanelAnimation();
+	animation.jumpTo(false);
+
+	animation.start(true, slide, timing);
+	animation.startCascade(400);
+	QCOMPARE(animation.duration(), 400.0);
+	animation.advance(100);
+	QCOMPARE(animation.cascadeTime(), 100.0);
+
+	animation.start(false, slide, timing);
+	QVERIFY(animation.duration() <= timing.hideMotionMs + 1e-9);
+	animation.advance(50);
+	QCOMPARE(animation.cascadeTime(), 150.0);
+
+	animation.start(true, slide, timing);
+	animation.advance(0);
+	QCOMPARE(animation.cascadeTime(), 150.0);
+	QVERIFY(animation.duration() >= 250 - 1e-9);
+	QVERIFY(animation.advance(animation.duration()));
+	QVERIFY(animation.cascadeTime() >= 400);
+	QVERIFY(animation.settled());
+
+	animation.jumpTo(false);
+	QCOMPARE(animation.cascadeTime(), 0.0);
+	animation.start(true, slide, timing);
+	QCOMPARE(animation.duration(), timing.showMotionMs);
+}
+
+void TestPanelAnimation::cascadeSections() {
+	using qs::windows::panelCascadeSections;
+
+	auto sidebar = QmlScene();
+	QVERIFY(sidebar.load(R"(
+		import QtQuick
+		Item {
+			width: 460; height: 1080
+			Item {
+				anchors.fill: parent; anchors.margins: 5; anchors.leftMargin: 10
+				Item {
+					anchors.fill: parent
+					Rectangle {
+						objectName: "shadow"; anchors.fill: background; color: "black"
+						Rectangle { anchors.fill: parent; color: "transparent" }
+					}
+					Rectangle {
+						id: background; objectName: "background"; anchors.fill: parent; color: "gray"
+						Item {
+							anchors.fill: parent; anchors.margins: 10
+							Rectangle { objectName: "s3"; y: 600; width: parent.width; height: 400 }
+							Rectangle { objectName: "s0"; y: 0; width: parent.width; height: 180; color: "red" }
+							Rectangle { objectName: "s1"; y: 190; width: parent.width; height: 60; color: "red" }
+							Item {
+								objectName: "s2"; y: 260; width: parent.width; height: 200
+								Rectangle { anchors.fill: parent; color: "blue" }
+							}
+							Rectangle { objectName: "hidden"; y: 470; width: 300; height: 50; visible: false }
+							Rectangle { objectName: "empty"; y: 530; width: parent.width; height: 0 }
+							Rectangle { objectName: "clear"; y: 540; width: parent.width; height: 20; opacity: 0 }
+							Item { objectName: "noContent"; y: 565; width: parent.width; height: 30 }
+						}
+					}
+				}
+			}
+		}
+	)"));
+
+	auto* sidebarRoot = qobject_cast<QQuickItem*>(sidebar.root.get());
+	QCOMPARE(
+	    objectNames(panelCascadeSections(sidebarRoot, Qt::RightEdge)),
+	    QStringList({"s0", "s1", "s2", "s3"})
+	);
+
+	auto bar = QmlScene();
+	QVERIFY(bar.load(R"(
+		import QtQuick
+		Item {
+			width: 1920; height: 70
+			MouseArea {
+				anchors.fill: parent
+				Item { objectName: "maskRegion"; width: 1920; height: 60 }
+				Item {
+					width: 1920; height: 45
+					Rectangle { objectName: "barBackground"; anchors.fill: parent; color: "black" }
+					Item { objectName: "right"; x: 1500; width: 400; height: 45; Rectangle {} }
+					Row { objectName: "middle"; x: 800; width: 320; height: 45; Rectangle {} }
+					Item { objectName: "left"; x: 10; width: 400; height: 45; Rectangle {} }
+				}
+				Item {
+					objectName: "decorators"; y: 45; width: 1920; height: 25
+					Rectangle { width: 25; height: 25 }
+					Rectangle { x: 1895; width: 25; height: 25 }
+				}
+			}
+		}
+	)"));
+
+	auto* barRoot = qobject_cast<QQuickItem*>(bar.root.get());
+	QCOMPARE(
+	    objectNames(panelCascadeSections(barRoot, Qt::TopEdge)),
+	    QStringList({"left", "middle", "right"})
+	);
+
+	auto stacked = QmlScene();
+	QVERIFY(stacked.load(R"(
+		import QtQuick
+		Item {
+			width: 400; height: 400
+			Rectangle { width: 200; height: 300; color: "red" }
+			Rectangle { x: 20; width: 200; height: 300; color: "green" }
+			Rectangle { x: 40; width: 200; height: 300; color: "blue" }
+		}
+	)"));
+	auto* stackedRoot = qobject_cast<QQuickItem*>(stacked.root.get());
+	QVERIFY(panelCascadeSections(stackedRoot, Qt::LeftEdge).isEmpty());
+
+	auto grid = QmlScene();
+	QVERIFY(grid.load(R"(
+		import QtQuick
+		Item {
+			width: 1000; height: 100
+			Repeater { model: 20; Rectangle { x: index * 50; width: 40; height: 40 } }
+		}
+	)"));
+	auto* gridRoot = qobject_cast<QQuickItem*>(grid.root.get());
+	QVERIFY(panelCascadeSections(gridRoot, Qt::TopEdge).isEmpty());
+
+	auto pair = QmlScene();
+	QVERIFY(pair.load(R"(
+		import QtQuick
+		Item {
+			width: 400; height: 400
+			Rectangle { width: 400; height: 100 }
+			Rectangle { y: 120; width: 400; height: 100 }
+		}
+	)"));
+	auto* pairRoot = qobject_cast<QQuickItem*>(pair.root.get());
+	QVERIFY(panelCascadeSections(pairRoot, Qt::LeftEdge).isEmpty());
+	QVERIFY(panelCascadeSections(nullptr, Qt::LeftEdge).isEmpty());
+}
+
+void TestPanelAnimation::cascadeBypass() {
+	auto window = QQuickWindow();
+	window.resize(400, 300);
+
+	auto column = QQuickItem();
+	column.setParentItem(window.contentItem());
+	column.setSize(QSizeF(400, 300));
+
+	auto section = QQuickItem();
+	section.setParentItem(&column);
+	section.setPosition(QPointF(10, 120));
+	section.setSize(QSizeF(380, 60));
+
+	auto child = QQuickItem();
+	child.setParentItem(&section);
+	child.setPosition(QPointF(5, 6));
+	child.setSize(QSizeF(20, 20));
+
+	auto before = child.mapToScene(QPointF(0, 0));
+	QCOMPARE(before, QPointF(15, 126));
+
+	{
+		auto transform = PanelContentTransform();
+		transform.appendToItem(&section);
+
+		auto frame = qs::windows::PanelAnimationFrame();
+		frame.offset = QPointF(36, 0);
+		transform.setFrame(frame, section.size());
+		QCOMPARE(child.mapToScene(QPointF(0, 0)), before + QPointF(36, 0));
+		QCOMPARE(section.position(), QPointF(10, 120));
+		QCOMPARE(section.size(), QSizeF(380, 60));
+
+		transform.setBypassed(true);
+		QCOMPARE(child.mapToScene(QPointF(0, 0)), before);
+		transform.setBypassed(false);
+
+		section.setOpacity(0.25);
+		QCOMPARE(section.position(), QPointF(10, 120));
+		section.setOpacity(1);
+	}
+
+	QCOMPARE(child.mapToScene(QPointF(0, 0)), before);
+}
+
+void TestPanelAnimation::keepAlive() {
+	auto lifetime = PanelEffectKeepAlive(100);
+	auto expired = QSignalSpy(&lifetime, &PanelEffectKeepAlive::expired);
+
+	QVERIFY(!lifetime.armed());
+	QCOMPARE(lifetime.interval(), 100);
+
+	lifetime.arm();
+	QVERIFY(lifetime.armed());
+
+	lifetime.acquire();
+	QVERIFY(!lifetime.armed());
+	QCOMPARE(lifetime.users(), 1);
+	QTest::qWait(150);
+	QCOMPARE(expired.count(), 0);
+
+	lifetime.acquire();
+	lifetime.release();
+	QVERIFY(!lifetime.armed());
+	QCOMPARE(lifetime.users(), 1);
+
+	lifetime.release();
+	QVERIFY(lifetime.armed());
+	QCOMPARE(lifetime.users(), 0);
+
+	QTest::qWait(60);
+	lifetime.acquire();
+	lifetime.release();
+	QTest::qWait(60);
+	QCOMPARE(expired.count(), 0);
+	QTRY_COMPARE(expired.count(), 1);
+	QVERIFY(!lifetime.armed());
+
+	lifetime.release();
+	QCOMPARE(lifetime.users(), 0);
+	QVERIFY(lifetime.armed());
+	lifetime.acquire();
+	QTest::qWait(150);
+	QCOMPARE(expired.count(), 1);
+	lifetime.release();
+	QTRY_COMPARE(expired.count(), 2);
+}
+
+void TestPanelAnimation::effectLifecycle() {
+	using qs::windows::panelEffectFrame;
+
+	auto scene = QmlScene();
+	QVERIFY(scene.load(EFFECT_WINDOW_QML));
+	auto* window = qobject_cast<QQuickWindow*>(scene.root.get());
+	QVERIFY(window != nullptr);
+	QVERIFY(QTest::qWaitForWindowExposed(window));
+
+	auto* root = window->contentItem();
+	auto* content = window->property("content").value<QQuickItem*>();
+	auto rootChildren = root->childItems();
+	auto guard = QObject();
+
+	auto effects = PanelEffects(PanelEffects::defaultShader(), 100);
+	auto unloaded = QSignalSpy(&effects, &PanelEffects::unloaded);
+	QVERIFY(!effects.loaded());
+	QVERIFY(!effects.unloadPending());
+	QCOMPARE(effects.liveLayers(), 0);
+
+	QPointer<QQuickItem> watched;
+
+	{
+		auto layer = effects.createLayer(&scene.engine, &guard, root, content, true);
+		QVERIFY(layer != nullptr);
+		QVERIFY(effects.loaded());
+		QCOMPARE(effects.liveLayers(), 1);
+		QVERIFY(!effects.unloadPending());
+
+		auto* item = layer->item();
+		watched = item;
+		QVERIFY(item != nullptr);
+		QCOMPARE(item->parentItem(), root);
+		QCOMPARE(item->parent(), static_cast<QObject*>(root));
+		QCOMPARE(item->size(), QSizeF(window->size()));
+		QCOMPARE(item->property("sourceItem").value<QQuickItem*>(), content);
+		QCOMPARE(item->property("mipmapped").toBool(), true);
+		QCOMPARE(item->property("fragmentShader").toUrl(), PanelEffects::defaultShader());
+		QVERIFY(item->property("status").toInt() != 2);
+		QVERIFY(!item->acceptedMouseButtons());
+		QVERIFY(!item->hasActiveFocus());
+
+		auto size = QSizeF(window->size());
+		auto reveal = panelEffectFrame(PanelEffect::Reveal, Qt::TopEdge, size, 0.5, QPointF());
+		layer->apply(reveal, size, 1);
+		QCOMPARE(item->property("revealRect").toRectF(), reveal.revealRect);
+		QCOMPARE(item->property("revealRadius").toReal(), reveal.revealRadius);
+		QCOMPARE(item->property("dissolve").toReal(), 1.0);
+		QCOMPARE(item->property("blurLod").toReal(), 0.0);
+
+		auto blur = panelEffectFrame(PanelEffect::Blur, Qt::TopEdge, size, 0, QPointF());
+		layer->apply(blur, size, 1);
+		QVERIFY(item->property("blurLod").toReal() > 0);
+		QVERIFY(item->property("blurStep").value<QVector2D>().x() > 0);
+		QVERIFY(item->property("revealRadius").toReal() < 0);
+
+		auto second = effects.createLayer(&scene.engine, &guard, root, content, false);
+		QVERIFY(second != nullptr);
+		QCOMPARE(effects.liveLayers(), 2);
+		QCOMPARE(second->item()->property("mipmapped").toBool(), false);
+		second.reset();
+		QCOMPARE(effects.liveLayers(), 1);
+		QVERIFY(!effects.unloadPending());
+	}
+
+	QVERIFY(watched == nullptr);
+	QCOMPARE(root->childItems(), rootChildren);
+	QCOMPARE(effects.liveLayers(), 0);
+	QVERIFY(effects.unloadPending());
+	QVERIFY(effects.loaded());
+
+	QTRY_COMPARE(unloaded.count(), 1);
+	QVERIFY(!effects.loaded());
+	QVERIFY(!effects.unloadPending());
+
+	auto again = effects.createLayer(&scene.engine, &guard, root, content, false);
+	QVERIFY(again != nullptr);
+	QVERIFY(effects.loaded());
+	effects.unload();
+	QVERIFY(effects.loaded());
+	again.reset();
+	effects.unload();
+	QVERIFY(!effects.loaded());
+	QCOMPARE(unloaded.count(), 2);
+	QVERIFY(!effects.failed());
+}
+
+void TestPanelAnimation::effectEngineGone() {
+	auto scene = QmlScene();
+	QVERIFY(scene.load(EFFECT_WINDOW_QML));
+	auto* window = qobject_cast<QQuickWindow*>(scene.root.get());
+	QVERIFY(window != nullptr);
+	auto* root = window->contentItem();
+	auto* content = window->property("content").value<QQuickItem*>();
+
+	auto effects = PanelEffects(PanelEffects::defaultShader(), 60000);
+	auto guard = std::make_unique<QObject>();
+
+	auto layer = effects.createLayer(&scene.engine, guard.get(), root, content, false);
+	QVERIFY(layer != nullptr);
+	layer.reset();
+	QVERIFY(effects.loaded());
+
+	guard.reset();
+	QVERIFY(!effects.loaded());
+	QVERIFY(!effects.failed());
+}
+
+void TestPanelAnimation::missingShader() {
+	auto scene = QmlScene();
+	QVERIFY(scene.load(EFFECT_WINDOW_QML));
+	auto* window = qobject_cast<QQuickWindow*>(scene.root.get());
+	QVERIFY(window != nullptr);
+	auto* root = window->contentItem();
+	auto* content = window->property("content").value<QQuickItem*>();
+
+	auto dir = QTemporaryDir();
+	QVERIFY(dir.isValid());
+	auto path = dir.filePath("broken.frag.qsb");
+	{
+		auto file = QFile(path);
+		QVERIFY(file.open(QFile::WriteOnly));
+		file.write("not a shader");
+	}
+
+	auto broken = PanelEffects(QUrl::fromLocalFile(path), 100);
+	QTest::ignoreMessage(QtWarningMsg, "qUncompress: Input data is corrupted");
+	QTest::ignoreMessage(QtWarningMsg, "Attempted to deserialize QShader with unknown version 0.");
+	QTest::ignoreMessage(
+	    QtWarningMsg,
+	    QRegularExpression("Expressive panel effects are unavailable.*not a valid shader")
+	);
+	QVERIFY(broken.createLayer(&scene.engine, nullptr, root, content, false) == nullptr);
+	QVERIFY(broken.failed());
+
+	{
+		auto effects = PanelEffects(QUrl("qrc:/Quickshell/Windows/shaders/missing.frag.qsb"), 100);
+		QTest::ignoreMessage(
+		    QtWarningMsg,
+		    QRegularExpression("Expressive panel effects are unavailable.*missing\\.frag\\.qsb")
+		);
+		QVERIFY(effects.createLayer(&scene.engine, nullptr, root, content, false) == nullptr);
+		QVERIFY(effects.failed());
+		QVERIFY(!effects.loaded());
+
+		QTest::failOnWarning(QRegularExpression("Expressive panel effects"));
+		QVERIFY(effects.createLayer(&scene.engine, nullptr, root, content, false) == nullptr);
+		QCOMPARE(effects.liveLayers(), 0);
+		QCOMPARE(root->childItems().size(), qsizetype(1));
+	}
+}
+
+void TestPanelAnimation::shaderReflection() {
+	auto file = QFile(":/Quickshell/Windows/shaders/panel_effect.frag.qsb");
+	QVERIFY(file.open(QFile::ReadOnly));
+
+	auto shader = QShader::fromSerialized(file.readAll());
+	QVERIFY(shader.isValid());
+	QCOMPARE(shader.stage(), QShader::FragmentStage);
+	QVERIFY(!shader.shader(QShaderKey(QShader::HlslShader, QShaderVersion(50))).shader().isEmpty());
+	QVERIFY(!shader.shader(QShaderKey(QShader::SpirvShader, QShaderVersion(100))).shader().isEmpty());
+	QVERIFY(!shader.shader(QShaderKey(QShader::GlslShader, QShaderVersion(150))).shader().isEmpty());
+
+	auto description = shader.description();
+	auto blocks = description.uniformBlocks();
+	QCOMPARE(blocks.size(), qsizetype(1));
+
+	auto members = std::set<QByteArray>();
+	for (const auto& member: blocks.first().members) members.insert(member.name);
+
+	const auto expected = std::set<QByteArray> {
+	    "qt_Matrix",
+	    "qt_Opacity",
+	    "itemSize",
+	    "blurStep",
+	    "blurLod",
+	    "dissolve",
+	    "noiseScale",
+	    "revealRect",
+	    "revealRadius",
+	};
+	QVERIFY(members == expected);
+
+	auto samplers = description.combinedImageSamplers();
+	QCOMPARE(samplers.size(), qsizetype(1));
+	QCOMPARE(samplers.first().name, QByteArray("source"));
+
+	auto scene = QmlScene();
+	QVERIFY(scene.load(EFFECT_WINDOW_QML));
+	auto* window = qobject_cast<QQuickWindow*>(scene.root.get());
+	auto* content = window->property("content").value<QQuickItem*>();
+	auto effects = PanelEffects(PanelEffects::defaultShader(), 60000);
+	auto layer = effects.createLayer(&scene.engine, nullptr, window->contentItem(), content, false);
+	QVERIFY(layer != nullptr);
+
+	for (const auto& member: expected) {
+		if (member.startsWith("qt_")) continue;
+		auto index = layer->item()->metaObject()->indexOfProperty(member.constData());
+		QVERIFY2(index >= 0, member.constData());
+	}
+
+	QVERIFY(layer->item()->metaObject()->indexOfProperty("source") >= 0);
+}
+
+void TestPanelAnimation::shaderUpToDate() {
+	auto qsb = qEnvironmentVariable("IIW_QSB");
+	if (qsb.isEmpty()) QSKIP("IIW_QSB is not set to the host qsb tool");
+
+	auto dir = QTemporaryDir();
+	QVERIFY(dir.isValid());
+	auto output = dir.filePath("panel_effect.frag.qsb");
+
+	auto process = QProcess();
+	process.start(qsb, {"--qt6", "-o", output, QS_WINDOWS_SHADER_SOURCE});
+	QVERIFY(process.waitForFinished(60000));
+	QVERIFY2(process.exitCode() == 0, process.readAllStandardError().constData());
+
+	auto rebuilt = QFile(output);
+	auto committed = QFile(QS_WINDOWS_SHADER_QSB);
+	QVERIFY(rebuilt.open(QFile::ReadOnly));
+	QVERIFY(committed.open(QFile::ReadOnly));
+	QVERIFY2(
+	    rebuilt.readAll() == committed.readAll(),
+	    "shaders/panel_effect.frag.qsb is stale, rebuild it"
+	);
+}
+
+void TestPanelAnimation::effectRendering() {
+	auto scene = QmlScene();
+	QVERIFY(scene.load(EFFECT_WINDOW_QML));
+	auto* window = qobject_cast<QQuickWindow*>(scene.root.get());
+	QVERIFY(window != nullptr);
+	QVERIFY(QTest::qWaitForWindowExposed(window));
+
+	auto* renderer = window->rendererInterface();
+	if (renderer == nullptr || !QSGRendererInterface::isApiRhiBased(renderer->graphicsApi())) {
+		QSKIP("needs an RHI scene graph (QT_QUICK_BACKEND=rhi)");
+	}
+
+	auto* root = window->contentItem();
+	auto* content = window->property("content").value<QQuickItem*>();
+	auto size = QSizeF(window->size());
+	auto baseline = window->grabWindow();
+	QVERIFY(alphaSum(baseline) > 0);
+
+	auto effects = PanelEffects(PanelEffects::defaultShader(), 60000);
+	auto layer = effects.createLayer(&scene.engine, nullptr, root, content, true);
+	QVERIFY(layer != nullptr);
+	QVERIFY(layer->item()->property("status").toInt() != 2);
+
+	layer->apply(PanelEffectFrame(), size, 1);
+	auto identity = window->grabWindow();
+	QVERIFY2(
+	    maxChannelDifference(identity, baseline) <= 2,
+	    qPrintable(QString("identity differs by %1").arg(maxChannelDifference(identity, baseline)))
+	);
+
+	auto dissolve = PanelEffectFrame();
+	dissolve.dissolve = 0;
+	layer->apply(dissolve, size, 1);
+	QCOMPARE(alphaSum(window->grabWindow()), 0.0);
+
+	dissolve.dissolve = 0.5;
+	layer->apply(dissolve, size, 1);
+	auto ratio = alphaSum(window->grabWindow()) / alphaSum(baseline);
+	QVERIFY2(ratio > 0.1 && ratio < 0.9, qPrintable(QString("half dissolved keeps %1").arg(ratio)));
+
+	using qs::windows::panelEffectFrame;
+	layer->apply(panelEffectFrame(PanelEffect::Reveal, Qt::TopEdge, size, 0, QPointF()), size, 1);
+	QCOMPARE(alphaSum(window->grabWindow()), 0.0);
+
+	layer->apply(panelEffectFrame(PanelEffect::Reveal, Qt::TopEdge, size, 0.45, QPointF()), size, 1);
+	auto half = window->grabWindow();
+	QVERIFY(alphaSum(half, QRect(0, 0, 64, 12)) > 0);
+	QCOMPARE(alphaSum(half, QRect(0, 36, 64, 12)), 0.0);
+
+	layer->apply(panelEffectFrame(PanelEffect::Reveal, Qt::TopEdge, size, 1, QPointF()), size, 1);
+	QVERIFY(maxChannelDifference(window->grabWindow(), baseline) <= 2);
+
+	layer->apply(panelEffectFrame(PanelEffect::Blur, Qt::TopEdge, size, 0, QPointF()), size, 1);
+	auto blurred = window->grabWindow();
+	QVERIFY(maxChannelDifference(blurred, baseline) > 20);
+	auto kept = alphaSum(blurred) / alphaSum(baseline);
+	QVERIFY2(kept > 0.85 && kept < 1.15, qPrintable(QString("blur keeps %1 of the alpha").arg(kept)));
+
+	layer.reset();
+	QVERIFY(maxChannelDifference(window->grabWindow(), baseline) <= 2);
 }
 
 QTEST_MAIN(TestPanelAnimation)

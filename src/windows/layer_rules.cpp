@@ -86,6 +86,21 @@ LayerRules LayerRules::parse(const QByteArray& data, const QString& path, QStrin
 			}
 		}
 
+		if (object.contains("expressive")) {
+			auto value = object.value("expressive");
+			auto effect = value.isString() ? parsePanelEffect(value.toString()) : std::nullopt;
+
+			if (value.isNull()) {
+				rule.effect = PanelEffect::Auto;
+			} else if (effect.has_value()) {
+				rule.effect = *effect;
+			} else {
+				warn(QString("%1: expressive must be \"auto\", \"standard\", \"spring\", \"cascade\", "
+				             "\"reveal\", \"blur\", \"dissolve\" or null, not %2")
+				         .arg(where, value.toVariant().toString()));
+			}
+		}
+
 		result.rules.append(rule);
 	}
 
@@ -100,6 +115,7 @@ LayerRule LayerRules::ruleFor(const QString& ns) const {
 		if (rule.blur.has_value()) result.blur = *rule.blur;
 		if (rule.ignoreAlpha.has_value()) result.ignoreAlpha = *rule.ignoreAlpha;
 		if (rule.animation.has_value()) result.animation = *rule.animation;
+		if (rule.effect.has_value()) result.effect = *rule.effect;
 	}
 
 	return result;
@@ -119,6 +135,7 @@ QVariantList LayerRules::info() const {
 		}
 
 		if (rule.animation.has_value()) map["animation"] = rule.animation->toString();
+		if (rule.effect.has_value()) map["expressive"] = panelEffectName(*rule.effect);
 
 		list.append(map);
 	}

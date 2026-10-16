@@ -9,6 +9,7 @@
 #include <qt_windows.h>
 
 #include <dwmapi.h>
+#include <dxgi.h>
 #include <qabstractanimation.h>
 #include <qbytearray.h>
 #include <qevent.h>
@@ -25,12 +26,14 @@
 #include <qeasingcurve.h>
 #include <qguiapplication.h>
 #include <qscreen.h>
+#include <qsgrendererinterface.h>
 #include <qtenvironmentvariables.h>
 #include <qtimer.h>
 #include <qtmetamacros.h>
 #include <qtypes.h>
 #include <qvariant.h>
 #include <qvariantanimation.h>
+#include <rhi/qrhi.h>
 #include <shellapi.h>
 
 #include "../core/generation.hpp"
@@ -43,6 +46,7 @@
 #include "desktop_host.hpp"
 #include "input_mask.hpp"
 #include "panel_animation.hpp"
+#include "panel_effects.hpp"
 #include "startup.hpp"
 #include "util.hpp"
 #include "virtual_desktops.hpp"
@@ -70,11 +74,70 @@ constexpr int FOCUS_EXPOSE_FALLBACK_MS = 500;
 constexpr int CLOSE_FRAMES = 2;
 constexpr int CLOSE_FRAME_TIMEOUT_MS = 150;
 constexpr int FIRST_FRAME_TIMEOUT_MS = 250;
+constexpr UINT MICROSOFT_VENDOR_ID = 0x1414;
 
 bool systemAnimationsEnabled() {
 	BOOL enabled = TRUE;
 	if (SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &enabled, 0) == 0) return true;
 	return enabled != FALSE;
+}
+
+bool primaryAdapterIsSoftware() {
+	static const bool software = []() {
+		IDXGIFactory1* factory = nullptr;
+		if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory)))) {
+			return false;
+		}
+
+		auto result = false;
+		IDXGIAdapter1* adapter = nullptr;
+
+		if (SUCCEEDED(factory->EnumAdapters1(0, &adapter))) {
+			DXGI_ADAPTER_DESC1 desc {};
+			if (SUCCEEDED(adapter->GetDesc1(&desc))) {
+				result = (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0
+				      || desc.VendorId == MICROSOFT_VENDOR_ID;
+			}
+			adapter->Release();
+		}
+
+		factory->Release();
+		return result;
+	}();
+
+	return software;
+}
+
+std::optional<bool> windowRendersInSoftware(QQuickWindow* window) {
+	auto* renderer = window->rendererInterface();
+	if (renderer != nullptr && !QSGRendererInterface::isApiRhiBased(renderer->graphicsApi())) {
+		return true;
+	}
+
+	auto* rhi = window->rhi();
+	if (rhi == nullptr) return std::nullopt;
+
+	auto info = rhi->driverInfo();
+	return info.deviceType == QRhiDriverInfo::CpuDevice || info.vendorId == MICROSOFT_VENDOR_ID;
+}
+
+bool expressiveOnSoftware() {
+	static const bool forced = qEnvironmentVariableIntValue("QS_EXPRESSIVE_SOFTWARE") != 0;
+	return forced;
+}
+
+bool softwareRendering(QQuickWindow* window) {
+	if (window != nullptr) {
+		if (auto known = windowRendersInSoftware(window)) return *known;
+	}
+
+	for (auto* other: QGuiApplication::topLevelWindows()) {
+		auto* quick = qobject_cast<QQuickWindow*>(other);
+		if (quick == nullptr || quick == window) continue;
+		if (auto known = windowRendersInSoftware(quick)) return *known;
+	}
+
+	return primaryAdapterIsSoftware();
 }
 
 bool ownsForeground(HWND hwnd) {
@@ -533,13 +596,13 @@ void WinPanelWindow::setVisibleDirect(bool visible) {
 	if (!visible) {
 		if (this->mClosing) return;
 
-		std::optional<PanelAnimationStyle> style;
+		std::optional<PanelAnimationChoice> choice;
 		if (this->isVisibleDirect() && this->hwnd() != nullptr && this->window->isExposed()) {
-			style = this->animationStyle();
+			choice = this->animationChoice();
 		}
 
-		if (style.has_value()) {
-			this->beginClose(*style);
+		if (choice.has_value()) {
+			this->beginClose(*choice);
 			return;
 		}
 
@@ -560,17 +623,17 @@ void WinPanelWindow::setVisibleDirect(bool visible) {
 		this->followFocusedScreen();
 	}
 
-	std::optional<PanelAnimationStyle> style;
-	if (!wasShown) style = this->animationStyle();
+	std::optional<PanelAnimationChoice> choice;
+	if (!wasShown) choice = this->animationChoice();
 
-	if (style.has_value()) {
+	if (choice.has_value()) {
 		if (this->window == nullptr) this->createWindow();
-		this->prepareShowAnimation(*style);
+		this->prepareShowAnimation(*choice);
 	}
 
 	this->ProxyWindowBase::setVisibleDirect(true);
 
-	if (style.has_value()) {
+	if (choice.has_value()) {
 		if (this->isVisibleDirect()) this->runAnimation(true);
 		else this->resetAnimation();
 	}
@@ -1264,14 +1327,9 @@ void WinPanelWindow::applyInputMask(const QRegion& region, bool hasMask) {
 }
 
 void WinPanelWindow::onPolished() {
-	auto* transform = this->mContentTransform.get();
-	if (transform != nullptr) transform->setBypassed(true);
-
+	this->setAnimationTransformsBypassed(true);
 	this->ProxyWindowBase::onPolished();
-
-	if (transform != nullptr && transform == this->mContentTransform.get()) {
-		transform->setBypassed(false);
-	}
+	this->setAnimationTransformsBypassed(false);
 }
 
 void WinPanelWindow::boundInputMask() {
@@ -1443,7 +1501,7 @@ bool WinPanelWindow::animationsAllowed() const {
 	return systemAnimationsEnabled();
 }
 
-std::optional<PanelAnimationStyle> WinPanelWindow::animationStyle() const {
+std::optional<PanelAnimationChoice> WinPanelWindow::animationChoice() const {
 	if (!this->animationsAllowed()) return std::nullopt;
 
 	auto* manager = BlurManager::instance();
@@ -1451,9 +1509,23 @@ std::optional<PanelAnimationStyle> WinPanelWindow::animationStyle() const {
 		manager->setShellDir(generation->rootPath.path());
 	}
 
-	auto style = manager->ruleFor(this->bNamespace.value()).animation;
-	if (!style.animates()) return std::nullopt;
-	return style;
+	auto rule = manager->ruleFor(this->bNamespace.value());
+	if (!rule.animation.animates()) return std::nullopt;
+
+	auto choice = PanelAnimationChoice {.style = rule.animation};
+	if (!manager->expressiveAnimations()) return choice;
+
+	if (!expressiveOnSoftware() && softwareRendering(this->window)) {
+		static auto logged = false;
+		if (!std::exchange(logged, true)) {
+			qCInfo(logPanel) << "No GPU, expressive panel animations use the standard ones";
+		}
+
+		return choice;
+	}
+
+	choice.effect = resolvePanelEffect(rule.animation, rule.effect);
+	return choice;
 }
 
 Qt::Edge WinPanelWindow::slideEdge(const PanelAnimationStyle& style) const {
@@ -1469,12 +1541,62 @@ Qt::Edge WinPanelWindow::slideEdge(const PanelAnimationStyle& style) const {
 	return panelSlideEdge(style.edge, panel, screen, edges);
 }
 
-void WinPanelWindow::prepareShowAnimation(const PanelAnimationStyle& style) {
-	this->mAnimationStyle = style;
-	this->mAnimationEdge = this->slideEdge(style);
+PanelAnimationTiming WinPanelWindow::animationTiming() const {
+	if (this->mAnimationEffect == PanelEffect::Standard) return PanelAnimationTiming::hyprland();
+
+	auto size = this->window != nullptr ? QSizeF(this->window->size()) : QSizeF();
+	auto overshoot = panelSpringOvershoot(
+	    this->mAnimationStyle,
+	    this->mAnimationEffect,
+	    this->mAnimationEdge,
+	    size
+	);
+	return PanelAnimationTiming::expressive(this->mAnimationEffect, overshoot);
+}
+
+std::optional<qreal> WinPanelWindow::animationTravel() const {
+	if (this->mAnimationEffect != PanelEffect::Reveal || this->window == nullptr) return std::nullopt;
+	return panelRevealTravel(this->mAnimationEdge, QSizeF(this->window->size()));
+}
+
+void WinPanelWindow::prepareShowAnimation(const PanelAnimationChoice& choice) {
+	this->mAnimationStyle = choice.style;
+	this->mAnimationEffect = choice.effect;
+	this->mAnimationEdge = this->slideEdge(choice.style);
 	this->mAnimationState.jumpTo(false);
 	this->blur->setSuspended(true);
+	this->prepareEffectLayer();
 	this->applyAnimationFrame();
+}
+
+void WinPanelWindow::prepareEffectLayer() {
+	if (!panelEffectUsesShader(this->mAnimationEffect)) {
+		this->mEffectLayer.reset();
+		return;
+	}
+
+	if (this->mEffectLayer != nullptr && this->mEffectLayer->item() != nullptr) return;
+	this->mEffectLayer.reset();
+
+	auto* generation = EngineGeneration::findObjectGeneration(this);
+	auto* engine = generation != nullptr ? generation->engine : nullptr;
+	auto* root = this->window != nullptr ? this->window->contentItem() : nullptr;
+	auto* source = this->contentItem();
+
+	if (engine != nullptr && root != nullptr && source != nullptr) {
+		this->mEffectLayer = PanelEffects::instance()->createLayer(
+		    engine,
+		    generation->root,
+		    root,
+		    source,
+		    this->mAnimationEffect == PanelEffect::Blur
+		);
+	}
+
+	if (this->mEffectLayer == nullptr) {
+		qCDebug(logPanel) << "No effect layer for" << this << "so it animates the standard way";
+		this->mAnimationEffect = PanelEffect::Standard;
+	}
 }
 
 void WinPanelWindow::runAnimation(bool show) {
@@ -1484,9 +1606,9 @@ void WinPanelWindow::runAnimation(bool show) {
 	auto fromHidden =
 	    show && this->mAnimationState.motion() <= 0 && this->mAnimationState.opacity() <= 0;
 	if (fromHidden) this->mAnimationEdge = this->slideEdge(this->mAnimationStyle);
+	this->mCascadePending = fromHidden && this->mAnimationEffect == PanelEffect::Cascade;
 
-	this->mAnimationState.start(show, this->mAnimationStyle);
-	auto duration = this->mAnimationState.duration();
+	this->mAnimationState.start(show, this->mAnimationStyle, this->animationTiming());
 
 	if (this->mAnimation == nullptr) {
 		this->mAnimation = new QVariantAnimation(this);
@@ -1507,14 +1629,11 @@ void WinPanelWindow::runAnimation(bool show) {
 		);
 	}
 
-	if (duration <= 0) {
+	if (this->mAnimationState.duration() <= 0 && !this->mCascadePending) {
 		this->onAnimationFinished();
 		return;
 	}
 
-	this->mAnimation->setStartValue(0.0);
-	this->mAnimation->setEndValue(duration);
-	this->mAnimation->setDuration(static_cast<int>(std::ceil(duration)));
 	this->applyAnimationFrame();
 
 	if (fromHidden && (this->window == nullptr || !this->window->isExposed())) {
@@ -1522,7 +1641,7 @@ void WinPanelWindow::runAnimation(bool show) {
 		return;
 	}
 
-	this->mAnimation->start();
+	this->runAnimationClock();
 }
 
 void WinPanelWindow::startAnimationClock() {
@@ -1531,7 +1650,53 @@ void WinPanelWindow::startAnimationClock() {
 	}
 
 	if (!this->mAnimationState.showing() || this->mAnimationState.settled()) return;
+	this->runAnimationClock();
+}
+
+void WinPanelWindow::runAnimationClock() {
+	if (std::exchange(this->mCascadePending, false)) this->beginCascade();
+
+	auto duration = this->mAnimationState.duration();
+	if (duration <= 0) {
+		this->onAnimationFinished();
+		return;
+	}
+
+	this->mAnimation->setStartValue(0.0);
+	this->mAnimation->setEndValue(duration);
+	this->mAnimation->setDuration(static_cast<int>(std::ceil(duration)));
 	this->mAnimation->start();
+}
+
+void WinPanelWindow::beginCascade() {
+	this->resetCascade();
+
+	auto* content = this->contentItem();
+	if (content == nullptr || this->window == nullptr) return;
+
+	auto sections = panelCascadeSections(content, this->mAnimationEdge);
+	if (sections.isEmpty()) return;
+
+	auto size = QSizeF(this->window->size());
+	this->mCascadeDistance = panelCascadeDistance(this->mAnimationEdge, size);
+	this->mCascadeSpring = SpringCurve::withOvershoot(panelCascadeOvershoot(this->mCascadeDistance));
+
+	for (auto* item: sections) {
+		auto section = CascadeSection {
+		    .item = item,
+		    .transform = std::make_unique<PanelContentTransform>(),
+		};
+
+		section.transform->appendToItem(item);
+		if (item->opacity() == 1) section.appliedOpacity = 1;
+		this->mCascade.push_back(std::move(section));
+	}
+
+	auto count = static_cast<qsizetype>(this->mCascade.size());
+	this->mAnimationState.startCascade(PanelCascadeTiming::expressive().durationFor(count));
+	qCDebug(logPanel) << "Cascading" << count << "sections of" << this;
+
+	this->applyCascadeFrame();
 }
 
 void WinPanelWindow::onAnimationTick(const QVariant& value) {
@@ -1556,18 +1721,21 @@ void WinPanelWindow::applyAnimationFrame() {
 	if (item == nullptr) return;
 
 	if (item != this->mAnimatedItem) {
-		this->resetAnimatedItem();
+		this->mContentTransform.reset();
+		if (this->mAnimatedItem != nullptr) this->mAnimatedItem->setOpacity(1);
 		this->mAnimatedItem = item;
 	}
 
 	auto size = QSizeF(this->window->size());
+	auto dpr = this->devicePixelRatio();
 	auto frame = panelAnimationFrame(
 	    this->mAnimationStyle,
 	    this->mAnimationEdge,
 	    size,
 	    this->mAnimationState.motion(),
 	    this->mAnimationState.opacity(),
-	    this->devicePixelRatio()
+	    dpr,
+	    this->animationTravel()
 	);
 
 	if (frame.offset.isNull() && frame.scale == 1) {
@@ -1582,9 +1750,82 @@ void WinPanelWindow::applyAnimationFrame() {
 	}
 
 	item->setOpacity(frame.opacity);
+
+	if (this->mEffectLayer != nullptr) {
+		auto effect = panelEffectFrame(
+		    this->mAnimationEffect,
+		    this->mAnimationEdge,
+		    size,
+		    this->mAnimationState.effect(),
+		    frame.offset
+		);
+
+		this->mEffectLayer->apply(effect, size, dpr);
+	}
+
+	this->applyCascadeFrame();
+}
+
+void WinPanelWindow::applyCascadeFrame() {
+	if (this->mCascade.empty()) return;
+
+	const auto& timing = PanelCascadeTiming::expressive();
+	auto elapsed = this->mAnimationState.cascadeTime();
+	auto dpr = this->devicePixelRatio();
+
+	for (std::size_t i = 0; i < this->mCascade.size(); i++) {
+		auto& section = this->mCascade[i];
+		auto* item = section.item.data();
+		if (item == nullptr) continue;
+
+		auto cascade = panelCascadeFrame(
+		    timing,
+		    this->mCascadeSpring,
+		    static_cast<qsizetype>(i),
+		    elapsed,
+		    this->mAnimationEdge,
+		    this->mCascadeDistance,
+		    dpr
+		);
+
+		auto frame = PanelAnimationFrame();
+		frame.offset = cascade.offset;
+		section.transform->setFrame(frame, item->size());
+
+		if (section.appliedOpacity < 0) continue;
+
+		if (item->opacity() != section.appliedOpacity) {
+			section.appliedOpacity = -1;
+			continue;
+		}
+
+		item->setOpacity(cascade.opacity);
+		section.appliedOpacity = item->opacity();
+	}
+}
+
+void WinPanelWindow::setAnimationTransformsBypassed(bool bypassed) {
+	if (this->mContentTransform != nullptr) this->mContentTransform->setBypassed(bypassed);
+
+	for (auto& section: this->mCascade) {
+		section.transform->setBypassed(bypassed);
+	}
+}
+
+void WinPanelWindow::resetCascade() {
+	for (auto& section: this->mCascade) {
+		auto* item = section.item.data();
+		if (item == nullptr || section.appliedOpacity < 0) continue;
+		if (item->opacity() == section.appliedOpacity) item->setOpacity(1);
+	}
+
+	this->mCascade.clear();
+	this->mCascadePending = false;
 }
 
 void WinPanelWindow::resetAnimatedItem() {
+	this->resetCascade();
+	this->mEffectLayer.reset();
 	this->mContentTransform.reset();
 	if (this->mAnimatedItem != nullptr) this->mAnimatedItem->setOpacity(1);
 	this->mAnimatedItem = nullptr;
@@ -1599,13 +1840,16 @@ void WinPanelWindow::resetAnimation() {
 	this->blur->setSuspended(false);
 }
 
-void WinPanelWindow::beginClose(const PanelAnimationStyle& style) {
+void WinPanelWindow::beginClose(const PanelAnimationChoice& choice) {
 	if (this->mAnimationState.settled()) {
-		this->mAnimationStyle = style;
-		this->mAnimationEdge = this->slideEdge(style);
+		this->mAnimationStyle = choice.style;
+		this->mAnimationEffect = choice.effect;
+		this->mAnimationEdge = this->slideEdge(choice.style);
+		this->prepareEffectLayer();
 	}
 
-	qCDebug(logPanel) << "Closing" << this << "with" << this->mAnimationStyle.toString();
+	qCDebug(logPanel) << "Closing" << this << "with" << this->mAnimationStyle.toString()
+	                  << panelEffectName(this->mAnimationEffect);
 
 	this->mClosing = true;
 	this->focusOnExpose = false;

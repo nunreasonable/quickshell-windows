@@ -57,6 +57,9 @@ public:
 	[[nodiscard]] bool panelAnimations() const { return this->mPanelAnimations; }
 	void setPanelAnimations(bool enabled);
 
+	[[nodiscard]] bool expressiveAnimations() const { return this->mExpressiveAnimations; }
+	void setExpressiveAnimations(bool expressive);
+
 	[[nodiscard]] QString configPath() const { return this->mConfigPath; }
 	[[nodiscard]] QVariantList rulesInfo() const;
 
@@ -119,6 +122,7 @@ private:
 	bool mDebugTint = false;
 	bool mEnabled = true;
 	bool mPanelAnimations = true;
+	bool mExpressiveAnimations = false;
 	Backend mBackend = Backend::HostBackdrop;
 
 	bool transparencyEffects = true;
@@ -213,6 +217,10 @@ class BackdropBlur: public QObject {
 	    bool panelAnimations READ panelAnimations WRITE setPanelAnimations
 	        NOTIFY panelAnimationsChanged
 	);
+	Q_PROPERTY(
+	    QString panelAnimationStyle READ panelAnimationStyle WRITE setPanelAnimationStyle
+	        NOTIFY panelAnimationsChanged
+	);
 	Q_PROPERTY(QString configPath READ configPath NOTIFY rulesChanged);
 	Q_PROPERTY(QVariantList rules READ rules NOTIFY rulesChanged);
 	QML_ELEMENT;
@@ -228,6 +236,8 @@ public:
 	[[nodiscard]] static bool available();
 	[[nodiscard]] static bool panelAnimations();
 	static void setPanelAnimations(bool enabled);
+	[[nodiscard]] static QString panelAnimationStyle();
+	static void setPanelAnimationStyle(const QString& style);
 	[[nodiscard]] static QString configPath();
 	[[nodiscard]] static QVariantList rules();
 

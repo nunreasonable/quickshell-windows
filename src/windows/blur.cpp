@@ -1046,6 +1046,14 @@ void BlurManager::setPanelAnimations(bool enabled) {
 	emit this->panelAnimationsChanged();
 }
 
+void BlurManager::setExpressiveAnimations(bool expressive) {
+	if (expressive == this->mExpressiveAnimations) return;
+	this->mExpressiveAnimations = expressive;
+
+	qCInfo(logBlur) << "Panel animation style" << (expressive ? "expressive" : "standard");
+	emit this->panelAnimationsChanged();
+}
+
 bool BlurManager::available() const {
 	return !this->unsupported && !this->mShutDown && this->envEnabled && this->rules.enabled()
 	    && this->transparencyEffects && !this->highContrast && !this->energySaver;
@@ -1642,6 +1650,18 @@ bool BackdropBlur::panelAnimations() {
 
 void BackdropBlur::setPanelAnimations(bool enabled) {
 	if (auto* manager = BlurManager::instance()) manager->setPanelAnimations(enabled);
+}
+
+QString BackdropBlur::panelAnimationStyle() {
+	auto* manager = BlurManager::instance();
+	return manager != nullptr && manager->expressiveAnimations() ? "expressive" : "standard";
+}
+
+void BackdropBlur::setPanelAnimationStyle(const QString& style) {
+	if (auto* manager = BlurManager::instance()) {
+		auto expressive = style.trimmed().compare("expressive", Qt::CaseInsensitive) == 0;
+		manager->setExpressiveAnimations(expressive);
+	}
 }
 
 QString BackdropBlur::configPath() {

@@ -5,6 +5,7 @@ qt_add_library(quickshell-windows STATIC
 	input_mask.cpp
 	panel_window.cpp
 	panel_animation.cpp
+	panel_effects.cpp
 	layer_rules.cpp
 	blur.cpp
 	blur_shapes.cpp
@@ -84,6 +85,11 @@ qt_add_qml_module(quickshell-windows
 qs_add_module_deps_light(quickshell-windows Quickshell)
 
 install_qml_module(quickshell-windows)
+
+qt_add_resources(quickshell-windows "windows-panel-effects"
+	PREFIX "/Quickshell/Windows"
+	FILES shaders/panel_effect.frag.qsb
+)
 
 target_include_directories(quickshell-windows PRIVATE
 	${CMAKE_CURRENT_SOURCE_DIR}/system

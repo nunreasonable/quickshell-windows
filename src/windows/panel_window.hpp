@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <optional>
+#include <vector>
 
 #include <qt_windows.h>
 
@@ -30,6 +31,7 @@
 #include "../window/proxywindow.hpp"
 #include "appbar.hpp"
 #include "panel_animation.hpp"
+#include "panel_effects.hpp"
 
 namespace qs::wayland::layershell {
 class WlrLayershell;
@@ -205,15 +207,23 @@ private:
 	void onWindowScreenChanged();
 	void recreateDestroyedWindow();
 	[[nodiscard]] bool animationsAllowed() const;
-	[[nodiscard]] std::optional<PanelAnimationStyle> animationStyle() const;
+	[[nodiscard]] std::optional<PanelAnimationChoice> animationChoice() const;
 	[[nodiscard]] Qt::Edge slideEdge(const PanelAnimationStyle& style) const;
-	void prepareShowAnimation(const PanelAnimationStyle& style);
+	[[nodiscard]] PanelAnimationTiming animationTiming() const;
+	[[nodiscard]] std::optional<qreal> animationTravel() const;
+	void prepareShowAnimation(const PanelAnimationChoice& choice);
+	void prepareEffectLayer();
 	void runAnimation(bool show);
 	void startAnimationClock();
+	void runAnimationClock();
+	void beginCascade();
 	void applyAnimationFrame();
+	void applyCascadeFrame();
+	void setAnimationTransformsBypassed(bool bypassed);
+	void resetCascade();
 	void resetAnimatedItem();
 	void resetAnimation();
-	void beginClose(const PanelAnimationStyle& style);
+	void beginClose(const PanelAnimationChoice& choice);
 	void reopen();
 	void waitForFrames(int frames, int timeoutMs, void (WinPanelWindow::*done)());
 	void cancelFrameWait();
@@ -261,7 +271,20 @@ private:
 	QPointer<QQuickItem> mAnimatedItem;
 	PanelAnimation mAnimationState;
 	PanelAnimationStyle mAnimationStyle;
+	PanelEffect mAnimationEffect = PanelEffect::Standard;
 	Qt::Edge mAnimationEdge = Qt::TopEdge;
+	std::unique_ptr<PanelEffectLayer> mEffectLayer;
+
+	struct CascadeSection {
+		QPointer<QQuickItem> item;
+		std::unique_ptr<PanelContentTransform> transform;
+		qreal appliedOpacity = -1;
+	};
+
+	std::vector<CascadeSection> mCascade;
+	SpringCurve mCascadeSpring;
+	qreal mCascadeDistance = 0;
+	bool mCascadePending = false;
 	QMetaObject::Connection mFrameWait;
 	quint32 mFrameWaitRequest = 0;
 	int mFramesLeft = 0;

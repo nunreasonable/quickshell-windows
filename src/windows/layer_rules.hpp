@@ -18,6 +18,7 @@ struct LayerRule {
 	bool blur = false;
 	std::optional<qreal> ignoreAlpha;
 	PanelAnimationStyle animation;
+	PanelEffect effect = PanelEffect::Auto;
 };
 
 class LayerRules {
@@ -40,6 +41,7 @@ private:
 		std::optional<bool> blur;
 		std::optional<std::optional<qreal>> ignoreAlpha;
 		std::optional<PanelAnimationStyle> animation;
+		std::optional<PanelEffect> effect;
 	};
 
 	QList<Rule> rules;
