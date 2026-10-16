@@ -1,16 +1,20 @@
 #include "wallpaper.hpp"
 
 #include <atomic>
+#include <string>
 #include <thread>
+#include <utility>
 
 #include <qcolor.h>
 #include <qcoreapplication.h>
 #include <qdir.h>
 #include <qfileinfo.h>
+#include <qhash.h>
 #include <qloggingcategory.h>
 #include <qmetaobject.h>
 #include <qpointer.h>
 #include <qstring.h>
+#include <qvariant.h>
 
 #include <qt_windows.h>
 
@@ -18,6 +22,7 @@
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shobjidl.h>
+#include <winstring.h>
 #include <wrl/client.h>
 
 #include <winrt/Windows.Foundation.h>
@@ -25,6 +30,8 @@
 #include <winrt/Windows.System.UserProfile.h>
 
 #include "../services/message_window.hpp"
+#include "../util.hpp"
+#include "../virtual_desktops.hpp"
 
 using Microsoft::WRL::ComPtr;
 
@@ -41,6 +48,61 @@ const wchar_t* const kDwmKey = L"Software\\Microsoft\\Windows\\DWM";
 const wchar_t* const kContentDeliveryKey =
     L"Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager";
 const wchar_t* const kLockScreenKey = L"Software\\Microsoft\\Windows\\CurrentVersion\\Lock Screen";
+const wchar_t* const kVirtualDesktopsKey =
+    L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\VirtualDesktops\\Desktops\\";
+
+const CLSID CLSID_IMMERSIVE_SHELL =
+    {0xc2f03a33, 0x21f5, 0x47fa, {0xb4, 0xbb, 0x15, 0x63, 0x62, 0xa2, 0xf2, 0x39}};
+const GUID SID_VIRTUAL_DESKTOP_MANAGER_INTERNAL =
+    {0xc5e0cdca, 0x7b6e, 0x41b2, {0x9f, 0xc4, 0xd9, 0x39, 0x75, 0xcc, 0x46, 0x7b}};
+
+MIDL_INTERFACE("3F07F4BE-B107-441A-AF0F-39D82529072C")
+ShellVirtualDesktop: public IUnknown {};
+
+MIDL_INTERFACE("53F5CA0B-158F-4124-900C-057158060B27")
+ShellVirtualDesktopManager: public IUnknown {
+public:
+	virtual HRESULT STDMETHODCALLTYPE GetCount(UINT* count) = 0;
+	virtual HRESULT STDMETHODCALLTYPE
+	MoveViewToDesktop(IUnknown* view, ShellVirtualDesktop* desktop) = 0;
+	virtual HRESULT STDMETHODCALLTYPE CanViewMoveDesktops(IUnknown* view, BOOL* canMove) = 0;
+	virtual HRESULT STDMETHODCALLTYPE GetCurrentDesktop(ShellVirtualDesktop** desktop) = 0;
+	virtual HRESULT STDMETHODCALLTYPE GetDesktops(IObjectArray** desktops) = 0;
+	virtual HRESULT STDMETHODCALLTYPE
+	GetAdjacentDesktop(ShellVirtualDesktop* from, int direction, ShellVirtualDesktop** desktop) = 0;
+	virtual HRESULT STDMETHODCALLTYPE SwitchDesktop(ShellVirtualDesktop* desktop) = 0;
+	virtual HRESULT STDMETHODCALLTYPE
+	SwitchDesktopAndMoveForegroundView(ShellVirtualDesktop* desktop) = 0;
+	virtual HRESULT STDMETHODCALLTYPE CreateDesktop(ShellVirtualDesktop** desktop) = 0;
+	virtual HRESULT STDMETHODCALLTYPE MoveDesktop(ShellVirtualDesktop* desktop, int index) = 0;
+	virtual HRESULT STDMETHODCALLTYPE
+	RemoveDesktop(ShellVirtualDesktop* desktop, ShellVirtualDesktop* fallback) = 0;
+	virtual HRESULT STDMETHODCALLTYPE FindDesktop(const GUID* id, ShellVirtualDesktop** desktop) = 0;
+	virtual HRESULT STDMETHODCALLTYPE GetDesktopSwitchIncludeExcludeViews(
+	    ShellVirtualDesktop* desktop,
+	    IObjectArray** include,
+	    IObjectArray** exclude
+	) = 0;
+	virtual HRESULT STDMETHODCALLTYPE SetDesktopName(ShellVirtualDesktop* desktop, HSTRING name) = 0;
+	virtual HRESULT STDMETHODCALLTYPE
+	SetDesktopWallpaper(ShellVirtualDesktop* desktop, HSTRING path) = 0;
+};
+
+struct BackgroundWallpaper {
+	SRWLOCK lock = SRWLOCK_INIT;
+	std::wstring pending;
+	bool running = false;
+};
+
+BackgroundWallpaper& backgroundWallpaper() {
+	static auto* state = new BackgroundWallpaper(); // NOLINT
+	return *state;
+}
+
+QHash<QString, QString>& appliedDesktopWallpapers() {
+	static auto* applied = new QHash<QString, QString>(); // NOLINT
+	return *applied;
+}
 
 void broadcastSettingChange(const wchar_t* setting) {
 	std::thread([setting] {
@@ -98,6 +160,38 @@ bool writeString(HKEY root, const wchar_t* subkey, const wchar_t* name, const wc
 
 	RegCloseKey(key);
 	return ok == ERROR_SUCCESS;
+}
+
+QString readString(HKEY root, const wchar_t* subkey, const wchar_t* name) {
+	HKEY key = nullptr;
+	if (RegOpenKeyExW(root, subkey, 0, KEY_READ, &key) != ERROR_SUCCESS) return {};
+
+	wchar_t buffer[MAX_PATH * 2] = {};
+	DWORD size = sizeof(buffer) - sizeof(wchar_t);
+	DWORD type = 0;
+	auto ok = RegQueryValueExW(key, name, nullptr, &type, reinterpret_cast<BYTE*>(buffer), &size);
+	RegCloseKey(key);
+	if (ok != ERROR_SUCCESS || (type != REG_SZ && type != REG_EXPAND_SZ)) return {};
+	return QString::fromWCharArray(buffer);
+}
+
+bool setWallpaperWithoutAnimation(const std::wstring& path) {
+	writeString(HKEY_CURRENT_USER, L"Control Panel\\Desktop", L"WallpaperStyle", L"10");
+	writeString(HKEY_CURRENT_USER, L"Control Panel\\Desktop", L"TileWallpaper", L"0");
+
+	auto ok = SystemParametersInfoW(
+	    SPI_SETDESKWALLPAPER,
+	    0,
+	    const_cast<wchar_t*>(path.c_str()),
+	    SPIF_UPDATEINIFILE | SPIF_SENDCHANGE
+	);
+
+	if (!ok) {
+		qCWarning(logWallpaper) << "SystemParametersInfo(SPI_SETDESKWALLPAPER) failed:"
+		                        << GetLastError();
+	}
+
+	return ok != FALSE;
 }
 
 bool parseHexColor(const QString& hex, QColor& out) {
@@ -206,21 +300,9 @@ bool Wallpaper::setWallpaper(const QString& path, bool animate) {
 	if (path.isEmpty()) return false;
 
 	auto wpath = QDir::toNativeSeparators(QFileInfo(path).absoluteFilePath()).toStdWString();
+	appliedDesktopWallpapers().clear();
 
-	if (!animate) {
-		writeString(HKEY_CURRENT_USER, L"Control Panel\\Desktop", L"WallpaperStyle", L"10");
-		writeString(HKEY_CURRENT_USER, L"Control Panel\\Desktop", L"TileWallpaper", L"0");
-
-		auto ok = SystemParametersInfoW(
-		    SPI_SETDESKWALLPAPER,
-		    0,
-		    const_cast<wchar_t*>(wpath.c_str()),
-		    SPIF_UPDATEINIFILE | SPIF_SENDCHANGE
-		);
-
-		if (ok) return true;
-		qCWarning(logWallpaper) << "SystemParametersInfo(SPI_SETDESKWALLPAPER) failed:" << GetLastError();
-	}
+	if (!animate && setWallpaperWithoutAnimation(wpath)) return true;
 
 	ComPtr<IDesktopWallpaper> wallpaper;
 	auto hr =
@@ -262,6 +344,141 @@ bool Wallpaper::setWallpaper(const QString& path, bool animate) {
 	}
 
 	return anyOk;
+}
+
+void Wallpaper::setWallpaperInBackground(const QString& path) {
+	if (path.isEmpty()) return;
+
+	auto wpath = QDir::toNativeSeparators(QFileInfo(path).absoluteFilePath()).toStdWString();
+	auto& state = backgroundWallpaper();
+
+	AcquireSRWLockExclusive(&state.lock);
+	state.pending = std::move(wpath);
+	auto start = !state.running;
+	state.running = true;
+	ReleaseSRWLockExclusive(&state.lock);
+
+	if (!start) return;
+
+	std::thread([&state]() {
+		while (true) {
+			AcquireSRWLockExclusive(&state.lock);
+			if (state.pending.empty() || gShuttingDown.load()) {
+				state.running = false;
+				ReleaseSRWLockExclusive(&state.lock);
+				return;
+			}
+
+			auto next = std::exchange(state.pending, std::wstring());
+			ReleaseSRWLockExclusive(&state.lock);
+
+			setWallpaperWithoutAnimation(next);
+		}
+	}).detach();
+}
+
+bool Wallpaper::setDesktopWallpapers(const QVariantMap& paths, const QString& fallback) {
+	if (windowsBuild() < 22000) return false;
+
+	ComPtr<IServiceProvider> shell;
+	auto hr = CoCreateInstance(CLSID_IMMERSIVE_SHELL, nullptr, CLSCTX_ALL, IID_PPV_ARGS(&shell));
+
+	if (FAILED(hr) || !shell) {
+		qCInfo(logWallpaper) << "Immersive shell unavailable for per desktop wallpapers:" << Qt::hex
+		                     << hr;
+		return false;
+	}
+
+	ComPtr<ShellVirtualDesktopManager> manager;
+	hr = shell->QueryService(SID_VIRTUAL_DESKTOP_MANAGER_INTERNAL, IID_PPV_ARGS(&manager));
+
+	if (FAILED(hr) || !manager) {
+		qCInfo(logWallpaper) << "Per desktop wallpapers aren't available on Windows build"
+		                     << windowsBuild() << ":" << Qt::hex << hr;
+		return false;
+	}
+
+	static const GUID null {};
+	const auto desktopList = VirtualDesktops::instance()->desktops();
+
+	for (const auto& desktop: desktopList) {
+		if (IsEqualGUID(desktop.id, null)) continue;
+
+		auto id = VirtualDesktops::guidToString(desktop.id);
+		auto target = paths.value(id).toString();
+		if (target.isEmpty()) target = fallback;
+		if (target.isEmpty()) continue;
+
+		auto native = QDir::toNativeSeparators(QFileInfo(target).absoluteFilePath());
+		auto key = (QString::fromWCharArray(kVirtualDesktopsKey) + id).toStdWString();
+		auto current = readString(HKEY_CURRENT_USER, key.c_str(), L"Wallpaper");
+
+		if (current.isEmpty()) current = appliedDesktopWallpapers().value(id);
+		if (current.compare(native, Qt::CaseInsensitive) == 0) continue;
+
+		ComPtr<ShellVirtualDesktop> shellDesktop;
+		hr = manager->FindDesktop(&desktop.id, &shellDesktop);
+		if (FAILED(hr) || !shellDesktop) {
+			qCWarning(logWallpaper) << "FindDesktop failed for" << id << ":" << Qt::hex << hr;
+			continue;
+		}
+
+		auto value = winrt::hstring(native.toStdWString());
+		auto* rawValue = static_cast<HSTRING>(winrt::get_abi(value));
+		hr = manager->SetDesktopWallpaper(shellDesktop.Get(), rawValue);
+		if (FAILED(hr)) {
+			qCWarning(logWallpaper) << "SetDesktopWallpaper failed for" << id << ":" << Qt::hex << hr;
+			continue;
+		}
+
+		appliedDesktopWallpapers().insert(id, native);
+	}
+
+	return true;
+}
+
+void Wallpaper::trackDesktops() {
+	if (this->mTrackingDesktops) return;
+	this->mTrackingDesktops = true;
+
+	auto* virtualDesktops = VirtualDesktops::instance();
+	QObject::connect(
+	    virtualDesktops,
+	    &VirtualDesktops::currentChanged,
+	    this,
+	    &Wallpaper::currentDesktopChanged
+	);
+	QObject::connect(
+	    virtualDesktops,
+	    &VirtualDesktops::desktopsChanged,
+	    this,
+	    &Wallpaper::desktopsChanged
+	);
+}
+
+QString Wallpaper::currentDesktop() {
+	this->trackDesktops();
+
+	static const GUID null {};
+	auto* virtualDesktops = VirtualDesktops::instance();
+	auto index = virtualDesktops->currentIndex();
+	if (index < 0 || index >= virtualDesktops->count()) return {};
+
+	const auto& id = virtualDesktops->desktops().at(index).id;
+	return IsEqualGUID(id, null) ? QString() : VirtualDesktops::guidToString(id);
+}
+
+QVariantList Wallpaper::desktops() {
+	this->trackDesktops();
+
+	static const GUID null {};
+	QVariantList list;
+	for (const auto& desktop: VirtualDesktops::instance()->desktops()) {
+		auto id = IsEqualGUID(desktop.id, null) ? QString() : VirtualDesktops::guidToString(desktop.id);
+		list.append(QVariantMap {{"id", id}, {"name", desktop.name}});
+	}
+
+	return list;
 }
 
 bool Wallpaper::isDarkMode() {
