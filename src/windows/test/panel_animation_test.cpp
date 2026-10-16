@@ -7,6 +7,8 @@
 #include <qnamespace.h>
 #include <qobject.h>
 #include <qpoint.h>
+#include <qqmlcomponent.h>
+#include <qqmlengine.h>
 #include <qquickitem.h>
 #include <qquickwindow.h>
 #include <qrect.h>
@@ -16,6 +18,7 @@
 #include <qtenvironmentvariables.h>
 #include <qtest.h>
 #include <qtestcase.h>
+#include <qurl.h>
 
 #include "layer_rules.hpp"
 #include "panel_animation.hpp"
@@ -31,6 +34,12 @@ using Kind = qs::windows::PanelAnimationStyle::Kind;
 namespace {
 
 bool near(qreal a, qreal b, qreal tolerance = 1e-3) { return std::abs(a - b) <= tolerance; }
+
+qreal effectiveOpacity(const QQuickItem* item) {
+	auto opacity = 1.0;
+	for (; item != nullptr; item = item->parentItem()) opacity *= item->opacity();
+	return opacity;
+}
 
 qreal sampledBezier(qreal x1, qreal y1, qreal x2, qreal y2, qreal x) {
 	auto bestT = 0.0;
@@ -75,6 +84,7 @@ private slots:
 	void slideEdges();
 	void contentTransform();
 	void maskBypass();
+	void overlayFollowsRoot();
 	void ruleMerging();
 	void iiRules();
 };
@@ -381,6 +391,99 @@ void TestPanelAnimation::maskBypass() {
 	}
 
 	QCOMPARE(child.mapToScene(QPointF(0, 0)), QPointF(10, 20));
+}
+
+void TestPanelAnimation::overlayFollowsRoot() {
+	auto engine = QQmlEngine();
+	auto component = QQmlComponent(&engine);
+	component.setData(
+	    R"(
+		import QtQuick
+		import QtQuick.Controls
+		Window {
+			width: 400
+			height: 300
+			visible: true
+			property Item content: content
+			property Item anchorItem: anchorItem
+			property Popup popup: popup
+			Item {
+				id: content
+				anchors.fill: parent
+				Item { id: anchorItem; x: 10; y: 20; width: 50; height: 60 }
+				Popup { id: popup; parent: anchorItem; x: 5; y: 5; width: 30; height: 30; visible: true }
+			}
+		}
+	)",
+	    QUrl()
+	);
+
+	auto* object = component.create();
+	QVERIFY2(object != nullptr, qPrintable(component.errorString()));
+	auto* window = qobject_cast<QQuickWindow*>(object);
+	QVERIFY(window != nullptr);
+	QVERIFY(QTest::qWaitForWindowExposed(window));
+
+	auto* root = window->contentItem();
+	auto* content = object->property("content").value<QQuickItem*>();
+	auto* anchorItem = object->property("anchorItem").value<QQuickItem*>();
+	auto* popup = object->property("popup").value<QObject*>();
+	QVERIFY(content != nullptr && anchorItem != nullptr && popup != nullptr);
+	QTRY_VERIFY(popup->property("opened").toBool());
+
+	auto* popupContent = popup->property("contentItem").value<QQuickItem*>();
+	QVERIFY(popupContent != nullptr);
+
+	auto underContent = false;
+	auto underRoot = false;
+	for (auto* item = popupContent->parentItem(); item != nullptr; item = item->parentItem()) {
+		if (item == content) underContent = true;
+		if (item == root) underRoot = true;
+	}
+
+	QVERIFY(!underContent);
+	QVERIFY(underRoot);
+
+	auto popupBefore = popupContent->mapToScene(QPointF(0, 0));
+	auto anchorBefore = anchorItem->mapToScene(QPointF(0, 0));
+	auto relativeBefore = content->mapFromItem(anchorItem, QPointF(0, 0));
+
+	{
+		auto transform = PanelContentTransform();
+		transform.appendToItem(content);
+
+		auto frame = qs::windows::PanelAnimationFrame();
+		frame.offset = QPointF(400, 0);
+		transform.setFrame(frame, QSizeF(window->size()));
+
+		QCOMPARE(anchorItem->mapToScene(QPointF(0, 0)), anchorBefore + QPointF(400, 0));
+		QCOMPARE(popupContent->mapToScene(QPointF(0, 0)), popupBefore);
+	}
+
+	{
+		auto transform = PanelContentTransform();
+		transform.appendToItem(root);
+
+		auto frame = qs::windows::PanelAnimationFrame();
+		frame.offset = QPointF(400, 0);
+		transform.setFrame(frame, QSizeF(window->size()));
+
+		QCOMPARE(popupContent->mapToScene(QPointF(0, 0)), popupBefore + QPointF(400, 0));
+		QCOMPARE(anchorItem->mapToScene(QPointF(0, 0)), anchorBefore + QPointF(400, 0));
+		QCOMPARE(content->mapFromItem(anchorItem, QPointF(0, 0)), relativeBefore);
+
+		transform.setBypassed(true);
+		QCOMPARE(anchorItem->mapToScene(QPointF(0, 0)), anchorBefore);
+		QCOMPARE(popupContent->mapToScene(QPointF(0, 0)), popupBefore);
+		transform.setBypassed(false);
+
+		root->setOpacity(0.25);
+		QVERIFY(qFuzzyCompare(effectiveOpacity(popupContent), 0.25));
+		root->setOpacity(1);
+	}
+
+	QCOMPARE(anchorItem->mapToScene(QPointF(0, 0)), anchorBefore);
+	delete object;
 }
 
 void TestPanelAnimation::ruleMerging() {

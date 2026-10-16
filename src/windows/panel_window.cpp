@@ -69,6 +69,7 @@ constexpr DWORD RESTACK_WINDOW_MS = 5000;
 constexpr int FOCUS_EXPOSE_FALLBACK_MS = 500;
 constexpr int CLOSE_FRAMES = 2;
 constexpr int CLOSE_FRAME_TIMEOUT_MS = 150;
+constexpr int FIRST_FRAME_TIMEOUT_MS = 250;
 
 bool systemAnimationsEnabled() {
 	BOOL enabled = TRUE;
@@ -458,9 +459,14 @@ ProxiedWindow* WinPanelWindow::disownWindow(bool keepItemOwnership) {
 }
 
 void WinPanelWindow::releaseNativeState() {
-	this->resetAnimation();
+	if (this->mClosing && this->window != nullptr && this->window->isVisible()) {
+		this->quietVisibilityChange = true;
+		this->window->setVisible(false);
+		this->quietVisibilityChange = false;
+	}
+
 	this->mClosing = false;
-	this->mCloseRequest++;
+	this->resetAnimation();
 
 	if (this->window != nullptr) {
 		InputMaskTracker::instance()->remove(this->window);
@@ -556,7 +562,11 @@ void WinPanelWindow::setVisibleDirect(bool visible) {
 
 	std::optional<PanelAnimationStyle> style;
 	if (!wasShown) style = this->animationStyle();
-	if (style.has_value()) this->prepareShowAnimation(*style);
+
+	if (style.has_value()) {
+		if (this->window == nullptr) this->createWindow();
+		this->prepareShowAnimation(*style);
+	}
 
 	this->ProxyWindowBase::setVisibleDirect(true);
 
@@ -1173,12 +1183,12 @@ void WinPanelWindow::updateFocusFlag() {
 		return;
 	}
 
-	if (this->focusFlagPending || !this->window->isVisible()) return;
+	if (this->focusFlagPending || !this->isVisibleDirect()) return;
 	this->focusFlagPending = true;
 
 	QTimer::singleShot(0, this, [this]() {
 		this->focusFlagPending = false;
-		if (this->window != nullptr && this->window->isVisible()) this->applyFocusFlag();
+		if (this->window != nullptr && this->isVisibleDirect()) this->applyFocusFlag();
 	});
 }
 
@@ -1469,10 +1479,11 @@ void WinPanelWindow::prepareShowAnimation(const PanelAnimationStyle& style) {
 
 void WinPanelWindow::runAnimation(bool show) {
 	if (this->mAnimation != nullptr) this->mAnimation->stop();
+	this->cancelFrameWait();
 
-	if (show && this->mAnimationState.motion() <= 0 && this->mAnimationState.opacity() <= 0) {
-		this->mAnimationEdge = this->slideEdge(this->mAnimationStyle);
-	}
+	auto fromHidden =
+	    show && this->mAnimationState.motion() <= 0 && this->mAnimationState.opacity() <= 0;
+	if (fromHidden) this->mAnimationEdge = this->slideEdge(this->mAnimationStyle);
 
 	this->mAnimationState.start(show, this->mAnimationStyle);
 	auto duration = this->mAnimationState.duration();
@@ -1505,6 +1516,21 @@ void WinPanelWindow::runAnimation(bool show) {
 	this->mAnimation->setEndValue(duration);
 	this->mAnimation->setDuration(static_cast<int>(std::ceil(duration)));
 	this->applyAnimationFrame();
+
+	if (fromHidden && (this->window == nullptr || !this->window->isExposed())) {
+		this->waitForFrames(1, FIRST_FRAME_TIMEOUT_MS, &WinPanelWindow::startAnimationClock);
+		return;
+	}
+
+	this->mAnimation->start();
+}
+
+void WinPanelWindow::startAnimationClock() {
+	if (this->mAnimation == nullptr || this->mAnimation->state() != QAbstractAnimation::Stopped) {
+		return;
+	}
+
+	if (!this->mAnimationState.showing() || this->mAnimationState.settled()) return;
 	this->mAnimation->start();
 }
 
@@ -1526,8 +1552,15 @@ void WinPanelWindow::onAnimationFinished() {
 }
 
 void WinPanelWindow::applyAnimationFrame() {
-	auto* item = this->mContentItem;
-	auto size = QSizeF(item->width(), item->height());
+	auto* item = this->window != nullptr ? this->window->contentItem() : nullptr;
+	if (item == nullptr) return;
+
+	if (item != this->mAnimatedItem) {
+		this->resetAnimatedItem();
+		this->mAnimatedItem = item;
+	}
+
+	auto size = QSizeF(this->window->size());
 	auto frame = panelAnimationFrame(
 	    this->mAnimationStyle,
 	    this->mAnimationEdge,
@@ -1551,14 +1584,18 @@ void WinPanelWindow::applyAnimationFrame() {
 	item->setOpacity(frame.opacity);
 }
 
+void WinPanelWindow::resetAnimatedItem() {
+	this->mContentTransform.reset();
+	if (this->mAnimatedItem != nullptr) this->mAnimatedItem->setOpacity(1);
+	this->mAnimatedItem = nullptr;
+}
+
 void WinPanelWindow::resetAnimation() {
 	if (this->mAnimation != nullptr) this->mAnimation->stop();
-	if (this->mCloseFrames) QObject::disconnect(this->mCloseFrames);
-	this->mCloseFrames = {};
+	this->cancelFrameWait();
 
 	this->mAnimationState.jumpTo(true);
-	this->mContentTransform.reset();
-	this->mContentItem->setOpacity(1);
+	this->resetAnimatedItem();
 	this->blur->setSuspended(false);
 }
 
@@ -1571,7 +1608,6 @@ void WinPanelWindow::beginClose(const PanelAnimationStyle& style) {
 	qCDebug(logPanel) << "Closing" << this << "with" << this->mAnimationStyle.toString();
 
 	this->mClosing = true;
-	this->mCloseRequest++;
 	this->focusOnExpose = false;
 	this->appBar.remove();
 	this->routeInputMask();
@@ -1587,9 +1623,6 @@ void WinPanelWindow::reopen() {
 	qCDebug(logPanel) << "Reopening" << this << "while it closes";
 
 	this->mClosing = false;
-	this->mCloseRequest++;
-	if (this->mCloseFrames) QObject::disconnect(this->mCloseFrames);
-	this->mCloseFrames = {};
 	this->routeInputMask();
 
 	if (this->animationsAllowed()) this->runAnimation(true);
@@ -1601,6 +1634,51 @@ void WinPanelWindow::reopen() {
 	emit this->visibleChanged();
 }
 
+void WinPanelWindow::waitForFrames(int frames, int timeoutMs, void (WinPanelWindow::*done)()) {
+	this->cancelFrameWait();
+
+	auto* window = this->window;
+	if (window == nullptr || !window->isVisible()) {
+		(this->*done)();
+		return;
+	}
+
+	auto request = this->mFrameWaitRequest;
+	this->mFramesLeft = frames;
+
+	this->mFrameWait = QObject::connect(
+	    window,
+	    &QQuickWindow::frameSwapped,
+	    this,
+	    [this, request, done]() {
+		    if (request != this->mFrameWaitRequest) return;
+
+		    if (--this->mFramesLeft > 0) {
+			    if (this->window != nullptr) this->window->update();
+			    return;
+		    }
+
+		    this->cancelFrameWait();
+		    (this->*done)();
+	    },
+	    Qt::QueuedConnection
+	);
+
+	QTimer::singleShot(timeoutMs, this, [this, request, done]() {
+		if (request != this->mFrameWaitRequest) return;
+		this->cancelFrameWait();
+		(this->*done)();
+	});
+
+	window->update();
+}
+
+void WinPanelWindow::cancelFrameWait() {
+	this->mFrameWaitRequest++;
+	if (this->mFrameWait) QObject::disconnect(this->mFrameWait);
+	this->mFrameWait = {};
+}
+
 void WinPanelWindow::hideAfterLastFrames() {
 	auto* window = this->window;
 
@@ -1609,41 +1687,14 @@ void WinPanelWindow::hideAfterLastFrames() {
 		return;
 	}
 
-	auto request = this->mCloseRequest;
-	this->mFramesBeforeHide = CLOSE_FRAMES;
-
-	if (this->mCloseFrames) QObject::disconnect(this->mCloseFrames);
-	this->mCloseFrames = QObject::connect(
-	    window,
-	    &QQuickWindow::frameSwapped,
-	    this,
-	    [this, request]() {
-		    if (request != this->mCloseRequest) return;
-
-		    if (--this->mFramesBeforeHide > 0) {
-			    if (this->window != nullptr) this->window->update();
-			    return;
-		    }
-
-		    this->finishClose();
-	    },
-	    Qt::QueuedConnection
-	);
-
-	QTimer::singleShot(CLOSE_FRAME_TIMEOUT_MS, this, [this, request]() {
-		if (request == this->mCloseRequest) this->finishClose();
-	});
-
-	window->update();
+	this->waitForFrames(CLOSE_FRAMES, CLOSE_FRAME_TIMEOUT_MS, &WinPanelWindow::finishClose);
 }
 
 void WinPanelWindow::finishClose() {
 	if (!this->mClosing) return;
 
 	this->mClosing = false;
-	this->mCloseRequest++;
-	if (this->mCloseFrames) QObject::disconnect(this->mCloseFrames);
-	this->mCloseFrames = {};
+	this->cancelFrameWait();
 
 	if (this->window != nullptr && this->window->isVisible()) {
 		this->quietVisibilityChange = true;
@@ -1653,6 +1704,7 @@ void WinPanelWindow::finishClose() {
 
 	this->resetAnimation();
 	this->routeInputMask();
+	this->scheduleUpdateDimensions();
 }
 
 void WinPanelWindow::releaseForegroundForClose() {

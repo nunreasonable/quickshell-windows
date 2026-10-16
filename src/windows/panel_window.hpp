@@ -12,6 +12,7 @@
 #include <qpointer.h>
 #include <qproperty.h>
 #include <qqmlintegration.h>
+#include <qquickitem.h>
 #include <qquickwindow.h>
 #include <qrect.h>
 #include <qregion.h>
@@ -208,10 +209,14 @@ private:
 	[[nodiscard]] Qt::Edge slideEdge(const PanelAnimationStyle& style) const;
 	void prepareShowAnimation(const PanelAnimationStyle& style);
 	void runAnimation(bool show);
+	void startAnimationClock();
 	void applyAnimationFrame();
+	void resetAnimatedItem();
 	void resetAnimation();
 	void beginClose(const PanelAnimationStyle& style);
 	void reopen();
+	void waitForFrames(int frames, int timeoutMs, void (WinPanelWindow::*done)());
+	void cancelFrameWait();
 	void hideAfterLastFrames();
 	void finishClose();
 	void releaseForegroundForClose();
@@ -253,12 +258,13 @@ private:
 
 	QVariantAnimation* mAnimation = nullptr;
 	std::unique_ptr<PanelContentTransform> mContentTransform;
+	QPointer<QQuickItem> mAnimatedItem;
 	PanelAnimation mAnimationState;
 	PanelAnimationStyle mAnimationStyle;
 	Qt::Edge mAnimationEdge = Qt::TopEdge;
-	QMetaObject::Connection mCloseFrames;
-	quint32 mCloseRequest = 0;
-	int mFramesBeforeHide = 0;
+	QMetaObject::Connection mFrameWait;
+	quint32 mFrameWaitRequest = 0;
+	int mFramesLeft = 0;
 	bool mClosing = false;
 	bool mInstantVisibility = false;
 
