@@ -686,7 +686,7 @@ void TestPanelAnimation::iiRules() {
 	    Expect {"quickshell:sidebarLeft", style(Kind::Slide, Qt::LeftEdge)},
 	    Expect {"quickshell:bar", style(Kind::Slide)},
 	    Expect {"quickshell:verticalBar", style(Kind::Slide)},
-	    Expect {"quickshell:dock", style(Kind::Slide, Qt::BottomEdge)},
+	    Expect {"quickshell:dock", style(Kind::Slide)},
 	    Expect {"quickshell:cheatsheet", style(Kind::Slide, Qt::BottomEdge)},
 	    Expect {"quickshell:osk", style(Kind::Slide, Qt::BottomEdge)},
 	    Expect {"quickshell:wallpaperSelector", style(Kind::Slide, Qt::TopEdge)},
@@ -705,6 +705,10 @@ void TestPanelAnimation::iiRules() {
 	    Expect {"quickshell:popup", style(Kind::None)},
 	    Expect {"quickshell:background", style(Kind::None)},
 	    Expect {"quickshell:spotlight", style(Kind::None)},
+	    Expect {"quickshell:colorPicker", style(Kind::None)},
+	    Expect {"quickshell:nowPlaying", style(Kind::None)},
+	    Expect {"quickshell:mediaControls", style(Kind::Popin, std::nullopt, 0.93)},
+	    Expect {"quickshell:equalizer", style(Kind::Popin, std::nullopt, 0.93)},
 	    Expect {"osk", style(Kind::None)},
 	    Expect {"sideright", style(Kind::Slide, Qt::RightEdge)},
 	};
@@ -737,7 +741,7 @@ void TestPanelAnimation::iiRules() {
 	    ExpectEffect {"quickshell:bar", PanelEffect::Cascade},
 	    ExpectEffect {"quickshell:verticalBar", PanelEffect::Cascade},
 	    ExpectEffect {"quickshell:reloadPopup", PanelEffect::Cascade},
-	    ExpectEffect {"quickshell:dock", PanelEffect::Reveal},
+	    ExpectEffect {"quickshell:dock", PanelEffect::Cascade},
 	    ExpectEffect {"quickshell:cheatsheet", PanelEffect::Reveal},
 	    ExpectEffect {"quickshell:osk", PanelEffect::Reveal},
 	    ExpectEffect {"quickshell:wallpaperSelector", PanelEffect::Reveal},
@@ -746,6 +750,7 @@ void TestPanelAnimation::iiRules() {
 	    ExpectEffect {"quickshell:overview", PanelEffect::Standard},
 	    ExpectEffect {"quickshell:session", PanelEffect::Standard},
 	    ExpectEffect {"quickshell:background", PanelEffect::Standard},
+	    ExpectEffect {"quickshell:mediaControls", PanelEffect::Blur},
 	};
 
 	for (const auto& expect: effects) {
