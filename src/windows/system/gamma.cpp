@@ -72,31 +72,32 @@ void GammaController::setTemperature(int kelvin) {
 	this->mKelvin = kelvin;
 
 	for (auto* screen: QGuiApplication::screens()) {
-		auto name = screen->name();
-		this->apply(name, this->brightness.value(name, 1.0));
+		this->reapply(screen->name());
 	}
 }
 
 void GammaController::setBrightness(const QString& screenName, qreal brightness) {
-	auto floor = brightness < 1.0 ? this->floorFor(screenName) : 1.0;
-	auto wanted = floor + std::clamp(brightness, 0.0, 1.0) * (1.0 - floor);
-	auto applied = wanted;
+	auto clamped = std::clamp(brightness, 0.0, 1.0);
+	if (clamped >= 1.0) this->backlightFactor.remove(screenName);
+	else this->backlightFactor.insert(screenName, clamped);
+	this->reapply(screenName);
+}
 
-	while (!this->apply(screenName, applied) && applied < 1.0) {
-		applied = std::min(1.0, applied + BRIGHTNESS_STEP);
-	}
+void GammaController::setDim(const QString& screenName, qreal factor) {
+	auto clamped = std::clamp(factor, 0.0, 1.0);
+	if (clamped >= 1.0) this->dimFactor.remove(screenName);
+	else this->dimFactor.insert(screenName, clamped);
+	this->reapply(screenName);
+}
 
-	if (applied > wanted) {
-		qCDebug(logGamma) << "Windows refused dimming" << screenName << "to" << wanted << "; went to"
-		                  << applied;
-	}
-
-	if (applied >= 1.0) this->brightness.remove(screenName);
-	else this->brightness.insert(screenName, applied);
+qreal GammaController::probeDimFloor(const QString& screenName) {
+	auto floor = this->floorFor(screenName);
+	this->reapply(screenName);
+	return floor;
 }
 
 bool GammaController::dims(const QString& screenName) const {
-	return this->brightness.contains(screenName);
+	return this->backlightFactor.contains(screenName);
 }
 
 qreal GammaController::floorFor(const QString& screenName) {
@@ -112,6 +113,25 @@ qreal GammaController::floorFor(const QString& screenName) {
 	qCInfo(logGamma) << "Software brightness of" << screenName << "goes down to" << floor;
 	this->floors.insert(screenName, floor);
 	return floor;
+}
+
+void GammaController::reapply(const QString& screenName) {
+	auto backlight = this->backlightFactor.value(screenName, 1.0);
+	auto dim = this->dimFactor.value(screenName, 1.0);
+	auto combined = std::clamp(backlight * dim, 0.0, 1.0);
+
+	auto floor = combined < 1.0 ? this->floorFor(screenName) : 1.0;
+	auto wanted = floor + combined * (1.0 - floor);
+	auto applied = wanted;
+
+	while (!this->apply(screenName, applied) && applied < 1.0) {
+		applied = std::min(1.0, applied + BRIGHTNESS_STEP);
+	}
+
+	if (applied > wanted) {
+		qCDebug(logGamma) << "Windows refused dimming" << screenName << "to" << wanted << "; went to"
+		                  << applied;
+	}
 }
 
 bool GammaController::apply(const QString& screenName, qreal brightness) {
@@ -160,7 +180,8 @@ void GammaController::restoreAll() {
 	}
 
 	this->mKelvin = 0;
-	this->brightness.clear();
+	this->backlightFactor.clear();
+	this->dimFactor.clear();
 }
 
 } // namespace qs::windows::sys
