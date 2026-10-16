@@ -95,6 +95,10 @@ void GammaController::setBrightness(const QString& screenName, qreal brightness)
 	else this->brightness.insert(screenName, applied);
 }
 
+bool GammaController::dims(const QString& screenName) const {
+	return this->brightness.contains(screenName);
+}
+
 qreal GammaController::floorFor(const QString& screenName) {
 	auto iter = this->floors.constFind(screenName);
 	if (iter != this->floors.constEnd()) return *iter;

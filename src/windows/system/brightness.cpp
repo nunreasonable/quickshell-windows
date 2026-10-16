@@ -1201,6 +1201,20 @@ void Brightness::startProbe(const QString& screenName, bool readDdc) {
 
 			    qCInfo(logBrightness).noquote() << describeProbe(screenName, probe, decision);
 
+			    auto* gamma = GammaController::instance();
+			    if (previous.method == BrightnessMethod::Software
+			        && decision.route.method == BrightnessMethod::Software
+			        && self->lastValue.contains(screenName))
+			    {
+				    decision.available = true;
+				    decision.brightness = self->lastValue.value(screenName);
+			    } else if (gamma->dims(screenName)) {
+				    qCInfo(logBrightness).noquote()
+				        << screenName
+				        << "drops the software dimming left from before, so the screen matches the slider";
+				    gamma->setBrightness(screenName, 1.0);
+			    }
+
 			    self->routes.insert(screenName, decision.route);
 			    if (decision.available) self->lastValue.insert(screenName, decision.brightness);
 			    else self->lastValue.remove(screenName);

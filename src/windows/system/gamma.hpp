@@ -15,6 +15,7 @@ public:
 
 	void setTemperature(int kelvin);
 	void setBrightness(const QString& screenName, qreal brightness);
+	[[nodiscard]] bool dims(const QString& screenName) const;
 
 	void restoreAll();
 
