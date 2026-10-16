@@ -14,6 +14,7 @@
 #include <qqmlengine.h>
 #include <qqmlfile.h>
 #include <qquickitem.h>
+#include <qquickwindow.h>
 #include <qrect.h>
 #include <qsize.h>
 #include <qstring.h>
@@ -202,6 +203,7 @@ std::unique_ptr<PanelEffectLayer> PanelEffects::createLayer(
 
 	qCDebug(logEffects) << "Effect layer on" << root << "with shader status"
 	                    << item->property("status").toInt();
+	this->trackHost(root->window());
 	return std::make_unique<PanelEffectLayer>(this, item);
 }
 
@@ -219,7 +221,6 @@ void PanelEffects::unload() {
 	if (this->keepAlive.users() > 0) return;
 
 	auto dropped = std::exchange(this->components, {});
-	if (dropped.empty()) return;
 
 	for (auto& entry: dropped) {
 		QObject::disconnect(entry.guard);
@@ -229,9 +230,43 @@ void PanelEffects::unload() {
 		entry.engine->trimComponentCache();
 	}
 
+	auto released = this->releaseHosts();
+	if (dropped.empty() && released == 0) return;
+
 	qCInfo(logEffects) << "Unloaded the expressive panel effects after" << this->keepAlive.interval()
-	                   << "ms without use";
+	                   << "ms without use and released the cached graphics of" << released
+	                   << "shown windows";
 	emit this->unloaded();
+}
+
+qsizetype PanelEffects::hostWindows() const {
+	return std::ranges::count_if(this->hosts, [](const QPointer<QQuickWindow>& host) {
+		return host != nullptr;
+	});
+}
+
+void PanelEffects::trackHost(QQuickWindow* window) {
+	std::erase_if(this->hosts, [](const QPointer<QQuickWindow>& host) { return host == nullptr; });
+	if (window == nullptr) return;
+
+	auto known = std::ranges::any_of(this->hosts, [window](const QPointer<QQuickWindow>& host) {
+		return host == window;
+	});
+
+	if (!known) this->hosts.emplace_back(window);
+}
+
+int PanelEffects::releaseHosts() {
+	auto released = 0;
+
+	for (const auto& host: std::exchange(this->hosts, {})) {
+		if (host == nullptr || !host->isVisible()) continue;
+
+		host->releaseResources();
+		released++;
+	}
+
+	return released;
 }
 
 QQmlComponent* PanelEffects::componentFor(QQmlEngine* engine, QObject* engineGuard) {

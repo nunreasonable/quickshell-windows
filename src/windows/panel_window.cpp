@@ -1579,11 +1579,15 @@ void WinPanelWindow::prepareEffectLayer() {
 	this->mEffectLayer.reset();
 
 	auto* generation = EngineGeneration::findObjectGeneration(this);
-	auto* engine = generation != nullptr ? generation->engine : nullptr;
+	auto alive = generation != nullptr && generation->root != nullptr;
+	auto* engine = alive ? generation->engine : nullptr;
 	auto* root = this->window != nullptr ? this->window->contentItem() : nullptr;
 	auto* source = this->contentItem();
+	auto* renderer = this->window != nullptr ? this->window->rendererInterface() : nullptr;
+	auto shaders =
+	    renderer != nullptr && QSGRendererInterface::isApiRhiBased(renderer->graphicsApi());
 
-	if (engine != nullptr && root != nullptr && source != nullptr) {
+	if (engine != nullptr && root != nullptr && source != nullptr && shaders) {
 		this->mEffectLayer = PanelEffects::instance()->createLayer(
 		    engine,
 		    generation->root,
@@ -1670,6 +1674,7 @@ void WinPanelWindow::runAnimationClock() {
 
 void WinPanelWindow::beginCascade() {
 	this->resetCascade();
+	this->mAnimationState.startCascade(0);
 
 	auto* content = this->contentItem();
 	if (content == nullptr || this->window == nullptr) return;

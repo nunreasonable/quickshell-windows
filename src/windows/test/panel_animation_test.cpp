@@ -1504,6 +1504,7 @@ void TestPanelAnimation::effectLifecycle() {
 	QVERIFY(!effects.loaded());
 	QVERIFY(!effects.unloadPending());
 	QCOMPARE(effects.liveLayers(), 0);
+	QCOMPARE(effects.hostWindows(), qsizetype(0));
 
 	QPointer<QQuickItem> watched;
 
@@ -1512,6 +1513,7 @@ void TestPanelAnimation::effectLifecycle() {
 		QVERIFY(layer != nullptr);
 		QVERIFY(effects.loaded());
 		QCOMPARE(effects.liveLayers(), 1);
+		QCOMPARE(effects.hostWindows(), qsizetype(1));
 		QVERIFY(!effects.unloadPending());
 
 		auto* item = layer->item();
@@ -1544,6 +1546,7 @@ void TestPanelAnimation::effectLifecycle() {
 		auto second = effects.createLayer(&scene.engine, &guard, root, content, false);
 		QVERIFY(second != nullptr);
 		QCOMPARE(effects.liveLayers(), 2);
+		QCOMPARE(effects.hostWindows(), qsizetype(1));
 		QCOMPARE(second->item()->property("mipmapped").toBool(), false);
 		second.reset();
 		QCOMPARE(effects.liveLayers(), 1);
@@ -1559,17 +1562,40 @@ void TestPanelAnimation::effectLifecycle() {
 	QTRY_COMPARE(unloaded.count(), 1);
 	QVERIFY(!effects.loaded());
 	QVERIFY(!effects.unloadPending());
+	QCOMPARE(effects.hostWindows(), qsizetype(0));
 
 	auto again = effects.createLayer(&scene.engine, &guard, root, content, false);
 	QVERIFY(again != nullptr);
 	QVERIFY(effects.loaded());
 	effects.unload();
 	QVERIFY(effects.loaded());
+	QCOMPARE(effects.hostWindows(), qsizetype(1));
 	again.reset();
 	effects.unload();
 	QVERIFY(!effects.loaded());
+	QCOMPARE(effects.hostWindows(), qsizetype(0));
 	QCOMPARE(unloaded.count(), 2);
 	QVERIFY(!effects.failed());
+
+	effects.unload();
+	QCOMPARE(unloaded.count(), 2);
+
+	auto other = QmlScene();
+	QVERIFY(other.load(EFFECT_WINDOW_QML));
+	auto* otherWindow = qobject_cast<QQuickWindow*>(other.root.get());
+	auto* otherContent = otherWindow->property("content").value<QQuickItem*>();
+	auto first = effects.createLayer(&scene.engine, &guard, root, content, false);
+	auto elsewhere =
+	    effects.createLayer(&other.engine, &guard, otherWindow->contentItem(), otherContent, false);
+	QVERIFY(first != nullptr && elsewhere != nullptr);
+	QCOMPARE(effects.hostWindows(), qsizetype(2));
+	first.reset();
+	elsewhere.reset();
+	other.root.reset();
+	QCOMPARE(effects.hostWindows(), qsizetype(1));
+	effects.unload();
+	QCOMPARE(effects.hostWindows(), qsizetype(0));
+	QCOMPARE(unloaded.count(), 3);
 }
 
 void TestPanelAnimation::effectEngineGone() {
@@ -1772,6 +1798,22 @@ void TestPanelAnimation::effectRendering() {
 
 	layer.reset();
 	QVERIFY(maxChannelDifference(window->grabWindow(), baseline) <= 2);
+
+	QCOMPARE(effects.hostWindows(), qsizetype(1));
+	auto invalidated = QSignalSpy(window, &QQuickWindow::sceneGraphInvalidated);
+	effects.unload();
+	QCOMPARE(effects.hostWindows(), qsizetype(0));
+	QVERIFY(!effects.loaded());
+	QVERIFY(maxChannelDifference(window->grabWindow(), baseline) <= 2);
+	QCOMPARE(invalidated.count(), 0);
+
+	layer = effects.createLayer(&scene.engine, nullptr, root, content, false);
+	QVERIFY(layer != nullptr);
+	layer->apply(panelEffectFrame(PanelEffect::Reveal, Qt::TopEdge, size, 0, QPointF()), size, 1);
+	QCOMPARE(alphaSum(window->grabWindow()), 0.0);
+	layer->apply(PanelEffectFrame(), size, 1);
+	QVERIFY(maxChannelDifference(window->grabWindow(), baseline) <= 2);
+	layer.reset();
 }
 
 QTEST_MAIN(TestPanelAnimation)

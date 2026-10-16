@@ -9,6 +9,7 @@
 #include <qqmlcomponent.h>
 #include <qqmlengine.h>
 #include <qquickitem.h>
+#include <qquickwindow.h>
 #include <qsize.h>
 #include <qstring.h>
 #include <qtclasshelpermacros.h>
@@ -91,6 +92,7 @@ public:
 	[[nodiscard]] bool failed() const { return this->mFailed; }
 	[[nodiscard]] int liveLayers() const { return this->keepAlive.users(); }
 	[[nodiscard]] bool unloadPending() const { return this->keepAlive.armed(); }
+	[[nodiscard]] qsizetype hostWindows() const;
 	void setUnloadInterval(int intervalMs) { this->keepAlive.setInterval(intervalMs); }
 
 	void unload();
@@ -111,10 +113,13 @@ private:
 	void drop(const QQmlEngine* engine);
 	void fail(const QString& reason);
 	void layerDone();
+	void trackHost(QQuickWindow* window);
+	int releaseHosts();
 
 	QUrl shader;
 	PanelEffectKeepAlive keepAlive;
 	std::vector<Loaded> components;
+	std::vector<QPointer<QQuickWindow>> hosts;
 	bool mFailed = false;
 	bool shaderChecked = false;
 
