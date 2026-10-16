@@ -28,6 +28,11 @@ if (WIN32)
 
 	target_sources(quickshell PRIVATE quickshell.rc)
 	target_sources(quickshell-gui PRIVATE quickshell.rc)
+	if (CMAKE_HOST_WIN32)
+		target_sources(quickshell PRIVATE quickshell.manifest)
+		target_sources(quickshell-gui PRIVATE quickshell.manifest)
+		set_property(SOURCE quickshell.rc APPEND PROPERTY COMPILE_DEFINITIONS QS_EXTERNAL_MANIFEST)
+	endif()
 	target_include_directories(quickshell PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 	target_include_directories(quickshell-gui PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 

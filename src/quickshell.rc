@@ -1,6 +1,8 @@
 #include "version_info.h"
 
+#ifndef QS_EXTERNAL_MANIFEST
 1 24 "quickshell.manifest"
+#endif
 
 #ifdef QS_WINDOWS_GUI_EXE
 #define QS_RC_FILE_DESCRIPTION QS_RC_PRODUCT_NAME " shell"
