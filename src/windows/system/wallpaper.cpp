@@ -302,6 +302,11 @@ bool Wallpaper::setWallpaper(const QString& path, bool animate) {
 	auto wpath = QDir::toNativeSeparators(QFileInfo(path).absoluteFilePath()).toStdWString();
 	appliedDesktopWallpapers().clear();
 
+	auto& background = backgroundWallpaper();
+	AcquireSRWLockExclusive(&background.lock);
+	background.pending = background.running ? wpath : std::wstring();
+	ReleaseSRWLockExclusive(&background.lock);
+
 	if (!animate && setWallpaperWithoutAnimation(wpath)) return true;
 
 	ComPtr<IDesktopWallpaper> wallpaper;
@@ -400,6 +405,8 @@ bool Wallpaper::setDesktopWallpapers(const QVariantMap& paths, const QString& fa
 
 	static const GUID null {};
 	const auto desktopList = VirtualDesktops::instance()->desktops();
+	auto attempts = 0;
+	auto applied = 0;
 
 	for (const auto& desktop: desktopList) {
 		if (IsEqualGUID(desktop.id, null)) continue;
@@ -425,16 +432,18 @@ bool Wallpaper::setDesktopWallpapers(const QVariantMap& paths, const QString& fa
 
 		auto value = winrt::hstring(native.toStdWString());
 		auto* rawValue = static_cast<HSTRING>(winrt::get_abi(value));
+		attempts++;
 		hr = manager->SetDesktopWallpaper(shellDesktop.Get(), rawValue);
 		if (FAILED(hr)) {
 			qCWarning(logWallpaper) << "SetDesktopWallpaper failed for" << id << ":" << Qt::hex << hr;
 			continue;
 		}
 
+		applied++;
 		appliedDesktopWallpapers().insert(id, native);
 	}
 
-	return true;
+	return attempts == 0 || applied > 0;
 }
 
 void Wallpaper::trackDesktops() {
