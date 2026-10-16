@@ -12,6 +12,7 @@ class Wallpaper: public QObject {
 	QML_ELEMENT;
 	QML_SINGLETON;
 	Q_PROPERTY(bool lockScreenImageSupported READ lockScreenImageSupported NOTIFY lockScreenImageSupportedChanged);
+	Q_PROPERTY(bool systemDarkMode READ systemDarkMode NOTIFY systemDarkModeChanged);
 
 public:
 	explicit Wallpaper(QObject* parent = nullptr);
@@ -30,6 +31,8 @@ public:
 
 	[[nodiscard]] bool lockScreenImageSupported() const { return this->mLockScreenImageSupported; }
 
+	[[nodiscard]] bool systemDarkMode() const { return this->mSystemDarkMode; }
+
 	Q_INVOKABLE void setLockScreenImage(const QString& path);
 
 	Q_INVOKABLE static void openLockScreenPersonalizationSettings();
@@ -39,12 +42,15 @@ public:
 signals:
 	void lockScreenImageSupportedChanged();
 	void lockScreenImageApplied(bool ok);
+	void systemDarkModeChanged();
 
 private:
 	void applyLockScreenResult(bool ok, const QString& errorMessage);
+	void refreshSystemDarkMode();
 
 	bool mLockScreenImageSupported = true;
 	bool mLockScreenAttemptRunning = false;
+	bool mSystemDarkMode = false;
 };
 
 } // namespace qs::windows::sys

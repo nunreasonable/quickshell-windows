@@ -24,6 +24,8 @@
 #include <winrt/Windows.Storage.h>
 #include <winrt/Windows.System.UserProfile.h>
 
+#include "../services/message_window.hpp"
+
 using Microsoft::WRL::ComPtr;
 
 namespace qs::windows::sys {
@@ -319,6 +321,26 @@ QString Wallpaper::matugenPath() {
 
 Wallpaper::Wallpaper(QObject* parent): QObject(parent) {
 	QObject::connect(qApp, &QCoreApplication::aboutToQuit, []() { gShuttingDown.store(true); });
+
+	this->mSystemDarkMode = Wallpaper::isDarkMode();
+
+	auto* window = qs::windows::services::ServiceMessageWindow::instance();
+	window->addHandler(WM_SETTINGCHANGE, [self = QPointer(this)](WPARAM /*wparam*/, LPARAM lparam) {
+		if (!self || lparam == 0) return;
+
+		auto name = QString::fromWCharArray(reinterpret_cast<const wchar_t*>(lparam)); // NOLINT
+		if (name.compare(QStringLiteral("ImmersiveColorSet"), Qt::CaseInsensitive) == 0) {
+			self->refreshSystemDarkMode();
+		}
+	});
+}
+
+void Wallpaper::refreshSystemDarkMode() {
+	auto value = Wallpaper::isDarkMode();
+	if (value != this->mSystemDarkMode) {
+		this->mSystemDarkMode = value;
+		emit this->systemDarkModeChanged();
+	}
 }
 
 void Wallpaper::setLockScreenImage(const QString& path) {
