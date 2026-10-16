@@ -17,7 +17,7 @@
 namespace qs::windows::sys {
 
 namespace {
-QS_LOGGING_CATEGORY(logGamma, "quickshell.windows.gamma", QtWarningMsg);
+QS_LOGGING_CATEGORY(logGamma, "quickshell.windows.gamma", QtInfoMsg);
 
 constexpr qreal BRIGHTNESS_STEP = 0.05;
 
