@@ -4,6 +4,8 @@ qt_add_library(quickshell-windows STATIC
 	appbar.cpp
 	input_mask.cpp
 	panel_window.cpp
+	panel_animation.cpp
+	layer_rules.cpp
 	blur.cpp
 	blur_shapes.cpp
 	keyboard_hook.cpp

@@ -286,7 +286,7 @@ void ProxyWindowBase::onVisibleChanged() {
 	}
 #endif
 
-	emit this->visibleChanged();
+	if (!this->quietVisibilityChange) emit this->visibleChanged();
 }
 
 bool ProxyWindowBase::deleteOnInvisible() const { return false; }

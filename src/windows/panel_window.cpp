@@ -1,11 +1,15 @@
 #include "panel_window.hpp"
 #include <algorithm>
 #include <cmath>
+#include <memory>
+#include <optional>
 #include <ranges>
 #include <utility>
 
 #include <qt_windows.h>
 
+#include <dwmapi.h>
+#include <qabstractanimation.h>
 #include <qbytearray.h>
 #include <qevent.h>
 #include <qlist.h>
@@ -18,14 +22,18 @@
 #include <qrect.h>
 #include <qregion.h>
 #include <qcursor.h>
+#include <qeasingcurve.h>
 #include <qguiapplication.h>
 #include <qscreen.h>
 #include <qtenvironmentvariables.h>
 #include <qtimer.h>
 #include <qtmetamacros.h>
 #include <qtypes.h>
+#include <qvariant.h>
+#include <qvariantanimation.h>
 #include <shellapi.h>
 
+#include "../core/generation.hpp"
 #include "../core/qmlscreen.hpp"
 #include "../core/types.hpp"
 #include "../window/panelinterface.hpp"
@@ -34,6 +42,7 @@
 #include "blur.hpp"
 #include "desktop_host.hpp"
 #include "input_mask.hpp"
+#include "panel_animation.hpp"
 #include "startup.hpp"
 #include "util.hpp"
 #include "virtual_desktops.hpp"
@@ -58,6 +67,51 @@ bool forceLayeredDesktopPanels() {
 constexpr int MAX_RESTACKS = 20;
 constexpr DWORD RESTACK_WINDOW_MS = 5000;
 constexpr int FOCUS_EXPOSE_FALLBACK_MS = 500;
+constexpr int CLOSE_FRAMES = 2;
+constexpr int CLOSE_FRAME_TIMEOUT_MS = 150;
+
+bool systemAnimationsEnabled() {
+	BOOL enabled = TRUE;
+	if (SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &enabled, 0) == 0) return true;
+	return enabled != FALSE;
+}
+
+bool ownsForeground(HWND hwnd) {
+	auto* current = GetForegroundWindow();
+
+	while (current != nullptr) {
+		if (current == hwnd) return true;
+		current = GetWindow(current, GW_OWNER);
+	}
+
+	return false;
+}
+
+HWND nextActivatableWindow(HWND from) {
+	for (auto* hwnd = GetWindow(from, GW_HWNDNEXT); hwnd != nullptr;
+	     hwnd = GetWindow(hwnd, GW_HWNDNEXT))
+	{
+		if (!IsWindowVisible(hwnd) || !IsWindowEnabled(hwnd) || IsIconic(hwnd)) continue;
+
+		auto exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+		if ((exStyle & (WS_EX_NOACTIVATE | WS_EX_TRANSPARENT)) != 0) continue;
+		if ((exStyle & WS_EX_TOOLWINDOW) != 0 && (exStyle & WS_EX_APPWINDOW) == 0) continue;
+
+		BOOL cloaked = FALSE;
+		if (SUCCEEDED(DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked)))
+		    && cloaked != FALSE)
+		{
+			continue;
+		}
+
+		RECT rect {};
+		if (!GetWindowRect(hwnd, &rect) || IsRectEmpty(&rect)) continue;
+
+		return hwnd;
+	}
+
+	return nullptr;
+}
 
 bool overlaps(HWND a, HWND b) {
 	RECT ra {};
@@ -404,6 +458,10 @@ ProxiedWindow* WinPanelWindow::disownWindow(bool keepItemOwnership) {
 }
 
 void WinPanelWindow::releaseNativeState() {
+	this->resetAnimation();
+	this->mClosing = false;
+	this->mCloseRequest++;
+
 	if (this->window != nullptr) {
 		InputMaskTracker::instance()->remove(this->window);
 
@@ -446,20 +504,66 @@ void WinPanelWindow::trySetHeight(qint32 implicitHeight) {
 	}
 }
 
+void WinPanelWindow::onReload(QObject* oldInstance) {
+	auto instant = std::exchange(this->mInstantVisibility, oldInstance != nullptr);
+	this->ProxyWindowBase::onReload(oldInstance);
+	this->mInstantVisibility = instant;
+}
+
 void WinPanelWindow::setScreen(QuickshellScreenInfo* screen) {
+	auto instant = std::exchange(this->mInstantVisibility, true);
 	this->ProxyWindowBase::setScreen(screen);
+	this->mInstantVisibility = instant;
 	this->updateScreen();
 }
 
 bool WinPanelWindow::aboveWindows() const { return this->bLayer.value() > PanelLayer::Bottom; }
 
+bool WinPanelWindow::isVisibleDirect() const {
+	return !this->mClosing && this->ProxyWindowBase::isVisibleDirect();
+}
+
 void WinPanelWindow::setVisibleDirect(bool visible) {
-	if (visible && this->mScreen == nullptr && !this->isVisibleDirect()) {
+	if (!visible) {
+		if (this->mClosing) return;
+
+		std::optional<PanelAnimationStyle> style;
+		if (this->isVisibleDirect() && this->hwnd() != nullptr && this->window->isExposed()) {
+			style = this->animationStyle();
+		}
+
+		if (style.has_value()) {
+			this->beginClose(*style);
+			return;
+		}
+
+		this->resetAnimation();
+		this->ProxyWindowBase::setVisibleDirect(false);
+		return;
+	}
+
+	if (this->mClosing) {
+		this->reopen();
+		return;
+	}
+
+	auto wasShown = this->isVisibleDirect();
+
+	if (this->mScreen == nullptr && !wasShown) {
 		if (this->window == nullptr) this->createWindow();
 		this->followFocusedScreen();
 	}
 
-	this->ProxyWindowBase::setVisibleDirect(visible);
+	std::optional<PanelAnimationStyle> style;
+	if (!wasShown) style = this->animationStyle();
+	if (style.has_value()) this->prepareShowAnimation(*style);
+
+	this->ProxyWindowBase::setVisibleDirect(true);
+
+	if (style.has_value()) {
+		if (this->isVisibleDirect()) this->runAnimation(true);
+		else this->resetAnimation();
+	}
 }
 
 void WinPanelWindow::followFocusedScreen() {
@@ -658,7 +762,7 @@ void WinPanelWindow::updateDimensions() {
 	auto edge = this->bcExclusionEdge.value();
 	auto zone = this->bcExclusiveZone.value();
 	auto wantsAppBar = !ignoreZones && edge != 0 && zone > 0 && hwnd != nullptr && rects.valid
-	                && this->window->isVisible();
+	                && this->isVisibleDirect();
 
 	if (wantsAppBar && !startup::settled()) {
 		wantsAppBar = false;
@@ -698,6 +802,8 @@ void WinPanelWindow::updateDimensions() {
 	} else {
 		this->appBar.remove();
 	}
+
+	if (this->mClosing) return;
 
 	auto geometry = QRect();
 
@@ -969,7 +1075,9 @@ void WinPanelWindow::routeInputMask() {
 	if (this->window == nullptr) return;
 	auto* tracker = InputMaskTracker::instance();
 
-	if (this->mHasInputMask && !this->mEmbedAboveIcons) {
+	if (this->mClosing) {
+		tracker->setMask(this->window, QRegion());
+	} else if (this->mHasInputMask && !this->mEmbedAboveIcons) {
 		tracker->setMask(this->window, this->mInputMask);
 	} else {
 		tracker->remove(this->window);
@@ -1080,6 +1188,7 @@ void WinPanelWindow::applyFocusFlag() {
 
 	this->window->setFlag(Qt::WindowDoesNotAcceptFocus, noFocus);
 	if (this->hwnd() != nullptr) this->applyNativeStyles();
+	InputMaskTracker::instance()->refresh();
 }
 
 void WinPanelWindow::focusWhenExposed() {
@@ -1142,6 +1251,17 @@ void WinPanelWindow::applyInputMask(const QRegion& region, bool hasMask) {
 
 	this->mRequestedMask = region;
 	this->applyBoundedMask(hasMask);
+}
+
+void WinPanelWindow::onPolished() {
+	auto* transform = this->mContentTransform.get();
+	if (transform != nullptr) transform->setBypassed(true);
+
+	this->ProxyWindowBase::onPolished();
+
+	if (transform != nullptr && transform == this->mContentTransform.get()) {
+		transform->setBypassed(false);
+	}
 }
 
 void WinPanelWindow::boundInputMask() {
@@ -1300,6 +1420,251 @@ bool WinPanelWindow::handleNativeMessage(MSG* msg, qintptr* result) {
 	}
 
 	return false;
+}
+
+bool WinPanelWindow::animationsAllowed() const {
+	if (this->mInstantVisibility || !startup::settled()) return false;
+	if (this->mEmbedParent != nullptr || this->wantsEmbedding()) return false;
+	if (this->mColor.alpha() != 0) return false;
+
+	auto* manager = BlurManager::instance();
+	if (manager == nullptr || manager->shutDown() || !manager->panelAnimations()) return false;
+
+	return systemAnimationsEnabled();
+}
+
+std::optional<PanelAnimationStyle> WinPanelWindow::animationStyle() const {
+	if (!this->animationsAllowed()) return std::nullopt;
+
+	auto* manager = BlurManager::instance();
+	if (auto* generation = EngineGeneration::findObjectGeneration(this)) {
+		manager->setShellDir(generation->rootPath.path());
+	}
+
+	auto style = manager->ruleFor(this->bNamespace.value()).animation;
+	if (!style.animates()) return std::nullopt;
+	return style;
+}
+
+Qt::Edge WinPanelWindow::slideEdge(const PanelAnimationStyle& style) const {
+	auto anchors = this->bAnchors.value();
+	auto edges = Qt::Edges();
+	if (anchors.mTop) edges |= Qt::TopEdge;
+	if (anchors.mBottom) edges |= Qt::BottomEdge;
+	if (anchors.mLeft) edges |= Qt::LeftEdge;
+	if (anchors.mRight) edges |= Qt::RightEdge;
+
+	auto panel = this->window != nullptr ? QRectF(this->window->geometry()) : QRectF();
+	auto screen = this->mTrackedScreen != nullptr ? QRectF(this->mTrackedScreen->geometry()) : panel;
+	return panelSlideEdge(style.edge, panel, screen, edges);
+}
+
+void WinPanelWindow::prepareShowAnimation(const PanelAnimationStyle& style) {
+	this->mAnimationStyle = style;
+	this->mAnimationEdge = this->slideEdge(style);
+	this->mAnimationState.jumpTo(false);
+	this->blur->setSuspended(true);
+	this->applyAnimationFrame();
+}
+
+void WinPanelWindow::runAnimation(bool show) {
+	if (this->mAnimation != nullptr) this->mAnimation->stop();
+
+	if (show && this->mAnimationState.motion() <= 0 && this->mAnimationState.opacity() <= 0) {
+		this->mAnimationEdge = this->slideEdge(this->mAnimationStyle);
+	}
+
+	this->mAnimationState.start(show, this->mAnimationStyle);
+	auto duration = this->mAnimationState.duration();
+
+	if (this->mAnimation == nullptr) {
+		this->mAnimation = new QVariantAnimation(this);
+		this->mAnimation->setEasingCurve(QEasingCurve::Linear);
+
+		QObject::connect(
+		    this->mAnimation,
+		    &QVariantAnimation::valueChanged,
+		    this,
+		    &WinPanelWindow::onAnimationTick
+		);
+
+		QObject::connect(
+		    this->mAnimation,
+		    &QAbstractAnimation::finished,
+		    this,
+		    &WinPanelWindow::onAnimationFinished
+		);
+	}
+
+	if (duration <= 0) {
+		this->onAnimationFinished();
+		return;
+	}
+
+	this->mAnimation->setStartValue(0.0);
+	this->mAnimation->setEndValue(duration);
+	this->mAnimation->setDuration(static_cast<int>(std::ceil(duration)));
+	this->applyAnimationFrame();
+	this->mAnimation->start();
+}
+
+void WinPanelWindow::onAnimationTick(const QVariant& value) {
+	if (this->mAnimation == nullptr || this->mAnimation->state() != QAbstractAnimation::Running) {
+		return;
+	}
+
+	this->mAnimationState.advance(value.toReal());
+	this->applyAnimationFrame();
+}
+
+void WinPanelWindow::onAnimationFinished() {
+	this->mAnimationState.advance(this->mAnimationState.duration());
+	this->applyAnimationFrame();
+
+	if (this->mAnimationState.showing()) this->resetAnimation();
+	else if (this->mClosing) this->hideAfterLastFrames();
+}
+
+void WinPanelWindow::applyAnimationFrame() {
+	auto* item = this->mContentItem;
+	auto size = QSizeF(item->width(), item->height());
+	auto frame = panelAnimationFrame(
+	    this->mAnimationStyle,
+	    this->mAnimationEdge,
+	    size,
+	    this->mAnimationState.motion(),
+	    this->mAnimationState.opacity(),
+	    this->devicePixelRatio()
+	);
+
+	if (frame.offset.isNull() && frame.scale == 1) {
+		this->mContentTransform.reset();
+	} else {
+		if (this->mContentTransform == nullptr) {
+			this->mContentTransform = std::make_unique<PanelContentTransform>();
+			this->mContentTransform->appendToItem(item);
+		}
+
+		this->mContentTransform->setFrame(frame, size);
+	}
+
+	item->setOpacity(frame.opacity);
+}
+
+void WinPanelWindow::resetAnimation() {
+	if (this->mAnimation != nullptr) this->mAnimation->stop();
+	if (this->mCloseFrames) QObject::disconnect(this->mCloseFrames);
+	this->mCloseFrames = {};
+
+	this->mAnimationState.jumpTo(true);
+	this->mContentTransform.reset();
+	this->mContentItem->setOpacity(1);
+	this->blur->setSuspended(false);
+}
+
+void WinPanelWindow::beginClose(const PanelAnimationStyle& style) {
+	if (this->mAnimationState.settled()) {
+		this->mAnimationStyle = style;
+		this->mAnimationEdge = this->slideEdge(style);
+	}
+
+	qCDebug(logPanel) << "Closing" << this << "with" << this->mAnimationStyle.toString();
+
+	this->mClosing = true;
+	this->mCloseRequest++;
+	this->focusOnExpose = false;
+	this->appBar.remove();
+	this->routeInputMask();
+	this->releaseForegroundForClose();
+	this->blur->setSuspended(true);
+	this->runAnimation(false);
+
+	this->bBackerVisibility = false;
+	emit this->visibleChanged();
+}
+
+void WinPanelWindow::reopen() {
+	qCDebug(logPanel) << "Reopening" << this << "while it closes";
+
+	this->mClosing = false;
+	this->mCloseRequest++;
+	if (this->mCloseFrames) QObject::disconnect(this->mCloseFrames);
+	this->mCloseFrames = {};
+	this->routeInputMask();
+
+	if (this->animationsAllowed()) this->runAnimation(true);
+	else this->resetAnimation();
+
+	this->bBackerVisibility = true;
+	this->onWindowVisibleChanged();
+	if (this->pendingPolish.inputMask) this->schedulePolish();
+	emit this->visibleChanged();
+}
+
+void WinPanelWindow::hideAfterLastFrames() {
+	auto* window = this->window;
+
+	if (window == nullptr || !window->isVisible() || !window->isExposed()) {
+		this->finishClose();
+		return;
+	}
+
+	auto request = this->mCloseRequest;
+	this->mFramesBeforeHide = CLOSE_FRAMES;
+
+	if (this->mCloseFrames) QObject::disconnect(this->mCloseFrames);
+	this->mCloseFrames = QObject::connect(
+	    window,
+	    &QQuickWindow::frameSwapped,
+	    this,
+	    [this, request]() {
+		    if (request != this->mCloseRequest) return;
+
+		    if (--this->mFramesBeforeHide > 0) {
+			    if (this->window != nullptr) this->window->update();
+			    return;
+		    }
+
+		    this->finishClose();
+	    },
+	    Qt::QueuedConnection
+	);
+
+	QTimer::singleShot(CLOSE_FRAME_TIMEOUT_MS, this, [this, request]() {
+		if (request == this->mCloseRequest) this->finishClose();
+	});
+
+	window->update();
+}
+
+void WinPanelWindow::finishClose() {
+	if (!this->mClosing) return;
+
+	this->mClosing = false;
+	this->mCloseRequest++;
+	if (this->mCloseFrames) QObject::disconnect(this->mCloseFrames);
+	this->mCloseFrames = {};
+
+	if (this->window != nullptr && this->window->isVisible()) {
+		this->quietVisibilityChange = true;
+		this->window->setVisible(false);
+		this->quietVisibilityChange = false;
+	}
+
+	this->resetAnimation();
+	this->routeInputMask();
+}
+
+void WinPanelWindow::releaseForegroundForClose() {
+	auto* hwnd = this->hwnd();
+	if (hwnd == nullptr || !ownsForeground(hwnd)) return;
+
+	auto* next = nextActivatableWindow(hwnd);
+	if (next == nullptr) next = GetShellWindow();
+	if (next == nullptr) return;
+
+	qCDebug(logPanel) << "Handing keyboard focus from" << this << "to" << next << "as it closes";
+	SetForegroundWindow(next);
 }
 
 WinPanelInterface::WinPanelInterface(QObject* parent)

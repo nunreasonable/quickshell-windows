@@ -1,7 +1,6 @@
 #pragma once
 
 #include <memory>
-#include <optional>
 
 #include <qt_windows.h>
 
@@ -16,7 +15,6 @@
 #include <qquickwindow.h>
 #include <qrect.h>
 #include <qregion.h>
-#include <qregularexpression.h>
 #include <qsize.h>
 #include <qstring.h>
 #include <qtclasshelpermacros.h>
@@ -26,17 +24,13 @@
 #include <qvariant.h>
 
 #include "blur_shapes.hpp"
+#include "layer_rules.hpp"
 
 class QWinEventNotifier;
 
 namespace qs::windows {
 
 class WinPanelWindow;
-
-struct BlurRule {
-	bool blur = false;
-	std::optional<qreal> ignoreAlpha;
-};
 
 class BackdropWindow;
 class PanelBlur;
@@ -53,12 +47,15 @@ public:
 	void setShellDir(const QString& shellDir);
 	void reload();
 
-	[[nodiscard]] BlurRule ruleFor(const QString& ns) const;
+	[[nodiscard]] LayerRule ruleFor(const QString& ns) const;
 
 	[[nodiscard]] bool enabled() const { return this->mEnabled; }
 	void setEnabled(bool enabled);
 
 	[[nodiscard]] bool available() const;
+
+	[[nodiscard]] bool panelAnimations() const { return this->mPanelAnimations; }
+	void setPanelAnimations(bool enabled);
 
 	[[nodiscard]] QString configPath() const { return this->mConfigPath; }
 	[[nodiscard]] QVariantList rulesInfo() const;
@@ -88,16 +85,10 @@ public:
 signals:
 	void rulesChanged();
 	void stateChanged();
+	void panelAnimationsChanged();
 
 private:
 	explicit BlurManager(QObject* parent);
-
-	struct Rule {
-		QString pattern;
-		QRegularExpression regex;
-		std::optional<bool> blur;
-		std::optional<std::optional<qreal>> ignoreAlpha;
-	};
 
 	void detectBackend();
 	void loadFile();
@@ -122,13 +113,12 @@ private:
 	QByteArray loadedData;
 	bool loaded = false;
 	bool parsed = false;
-	QList<Rule> rules;
-	bool fileEnabled = true;
-	bool fileLayered = false;
+	LayerRules rules;
 	bool envEnabled = true;
 	bool envLayered = false;
 	bool mDebugTint = false;
 	bool mEnabled = true;
+	bool mPanelAnimations = true;
 	Backend mBackend = Backend::HostBackdrop;
 
 	bool transparencyEffects = true;
@@ -169,6 +159,7 @@ public:
 
 	void syncPlacement();
 	void recreate();
+	void setSuspended(bool suspended);
 
 	void updateActive();
 
@@ -200,8 +191,9 @@ private:
 	QMetaObject::Connection frameConnection;
 	QPointer<QQuickWindow> framesWindow;
 	std::unique_ptr<BackdropWindow> backdrop;
-	BlurRule rule;
+	LayerRule rule;
 	bool active = false;
+	bool suspended = false;
 	bool shapesPending = false;
 	bool shapesForced = true;
 	ShapeInputs lastInputs;
@@ -217,6 +209,10 @@ class BackdropBlur: public QObject {
 	Q_OBJECT;
 	Q_PROPERTY(bool enabled READ enabled WRITE setEnabled NOTIFY stateChanged);
 	Q_PROPERTY(bool available READ available NOTIFY stateChanged);
+	Q_PROPERTY(
+	    bool panelAnimations READ panelAnimations WRITE setPanelAnimations
+	        NOTIFY panelAnimationsChanged
+	);
 	Q_PROPERTY(QString configPath READ configPath NOTIFY rulesChanged);
 	Q_PROPERTY(QVariantList rules READ rules NOTIFY rulesChanged);
 	QML_ELEMENT;
@@ -230,6 +226,8 @@ public:
 	[[nodiscard]] static bool enabled();
 	static void setEnabled(bool enabled);
 	[[nodiscard]] static bool available();
+	[[nodiscard]] static bool panelAnimations();
+	static void setPanelAnimations(bool enabled);
 	[[nodiscard]] static QString configPath();
 	[[nodiscard]] static QVariantList rules();
 
@@ -238,6 +236,7 @@ public:
 signals:
 	void stateChanged();
 	void rulesChanged();
+	void panelAnimationsChanged();
 };
 
 } // namespace qs::windows

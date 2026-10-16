@@ -2,7 +2,6 @@
 #include <algorithm>
 #include <cmath>
 #include <memory>
-#include <optional>
 #include <utility>
 #include <vector>
 
@@ -12,7 +11,6 @@
 #include <qdir.h>
 #include <qfile.h>
 #include <qfileinfo.h>
-#include <qjsonarray.h>
 #include <qjsondocument.h>
 #include <qjsonobject.h>
 #include <qjsonvalue.h>
@@ -27,6 +25,7 @@
 #include <qquickwindow.h>
 #include <qstandardpaths.h>
 #include <qstring.h>
+#include <qstringlist.h>
 #include <qtimer.h>
 #include <qvariant.h>
 #include <qwineventnotifier.h>
@@ -1039,12 +1038,20 @@ void BlurManager::setEnabled(bool enabled) {
 	this->scheduleNotifyPanels();
 }
 
+void BlurManager::setPanelAnimations(bool enabled) {
+	if (enabled == this->mPanelAnimations) return;
+	this->mPanelAnimations = enabled;
+
+	qCInfo(logBlur) << "Panel open and close animations" << (enabled ? "on" : "off");
+	emit this->panelAnimationsChanged();
+}
+
 bool BlurManager::available() const {
-	return !this->unsupported && !this->mShutDown && this->envEnabled && this->fileEnabled
+	return !this->unsupported && !this->mShutDown && this->envEnabled && this->rules.enabled()
 	    && this->transparencyEffects && !this->highContrast && !this->energySaver;
 }
 
-bool BlurManager::layeredBackdrops() const { return this->envLayered || this->fileLayered; }
+bool BlurManager::layeredBackdrops() const { return this->envLayered || this->rules.layered(); }
 
 void BlurManager::scheduleNotifyPanels() {
 	if (this->notifyPending) return;
@@ -1263,94 +1270,19 @@ void BlurManager::updateWatches() {
 }
 
 void BlurManager::parse(const QByteArray& data, const QString& path) {
-	this->rules.clear();
-	this->fileEnabled = true;
-	this->fileLayered = false;
-	if (data.isEmpty()) return;
+	QStringList warnings;
+	this->rules = LayerRules::parse(data, path, &warnings);
 
-	QJsonParseError parseError {};
-	auto document = QJsonDocument::fromJson(data, &parseError);
-	if (document.isNull()) {
-		qCWarning(logBlur) << "Failed to parse" << path << ":" << parseError.errorString() << "at offset"
-		                   << parseError.offset;
-		return;
+	for (const auto& warning: warnings) qCWarning(logBlur).noquote() << warning;
+
+	if (this->rules.valid()) {
+		qCInfo(logBlur).noquote() << "Loaded" << this->rules.size() << "layer rules from" << path;
 	}
-
-	auto root = document.object();
-	this->fileEnabled = root.value("enable").toBool(true);
-	this->fileLayered = root.value("layered").toBool(false);
-
-	auto list = root.value("rules").toArray();
-
-	for (auto i = 0; i < list.size(); i++) {
-		auto object = list.at(i).toObject();
-		auto where = QString("%1 rule %2").arg(path).arg(i);
-
-		auto rule = Rule();
-		rule.pattern = object.value("namespace").toString();
-
-		if (rule.pattern.isEmpty()) {
-			qCWarning(logBlur).noquote() << where << ": no namespace";
-			continue;
-		}
-
-		rule.regex = QRegularExpression(QRegularExpression::anchoredPattern(rule.pattern));
-		if (!rule.regex.isValid()) {
-			qCWarning(logBlur).noquote() << where << ": invalid regex" << rule.pattern << ":"
-			                             << rule.regex.errorString();
-			continue;
-		}
-
-		if (object.contains("blur")) rule.blur = object.value("blur").toBool();
-
-		if (object.contains("ignoreAlpha")) {
-			auto value = object.value("ignoreAlpha");
-
-			if (value.isNull()) {
-				rule.ignoreAlpha.emplace();
-			} else if (value.isDouble()) {
-				rule.ignoreAlpha.emplace(std::clamp(value.toDouble(), 0.0, 1.0));
-			} else {
-				qCWarning(logBlur).noquote() << where << ": ignoreAlpha must be a number or null";
-			}
-		}
-
-		this->rules.append(rule);
-	}
-
-	qCInfo(logBlur).noquote() << "Loaded" << this->rules.size() << "layer rules from" << path;
 }
 
-BlurRule BlurManager::ruleFor(const QString& ns) const {
-	auto result = BlurRule();
+LayerRule BlurManager::ruleFor(const QString& ns) const { return this->rules.ruleFor(ns); }
 
-	for (const auto& rule: this->rules) {
-		if (!rule.regex.match(ns).hasMatch()) continue;
-		if (rule.blur.has_value()) result.blur = *rule.blur;
-		if (rule.ignoreAlpha.has_value()) result.ignoreAlpha = *rule.ignoreAlpha;
-	}
-
-	return result;
-}
-
-QVariantList BlurManager::rulesInfo() const {
-	QVariantList list;
-
-	for (const auto& rule: this->rules) {
-		QVariantMap map;
-		map["namespace"] = rule.pattern;
-		if (rule.blur.has_value()) map["blur"] = *rule.blur;
-
-		if (rule.ignoreAlpha.has_value()) {
-			map["ignoreAlpha"] = rule.ignoreAlpha->has_value() ? QVariant(**rule.ignoreAlpha)
-			                                                   : QVariant::fromValue(nullptr);
-		}
-
-		list.append(map);
-	}
-
-	return list;
-}
+QVariantList BlurManager::rulesInfo() const { return this->rules.info(); }
 
 PanelBlur::PanelBlur(WinPanelWindow* panel): QObject(panel), panel(panel) {
 	if (auto* manager = BlurManager::instance()) manager->registerPanel(this);
@@ -1404,6 +1336,19 @@ void PanelBlur::recreate() {
 	this->active = false;
 }
 
+void PanelBlur::setSuspended(bool suspended) {
+	if (suspended == this->suspended) return;
+	this->suspended = suspended;
+
+	if (suspended) {
+		if (this->backdrop != nullptr) this->backdrop->hide();
+		return;
+	}
+
+	this->stale = true;
+	if (this->active && this->panelShown()) this->scheduleShapes();
+}
+
 void PanelBlur::destroyBackdrop() {
 	this->backdrop.reset();
 	this->shapes.clear();
@@ -1440,7 +1385,7 @@ void PanelBlur::updateActive() {
 
 		this->rule = manager->ruleFor(this->panel->ns());
 	} else {
-		this->rule = BlurRule();
+		this->rule = LayerRule();
 	}
 
 	auto wanted = manager != nullptr && manager->enabled() && manager->available() && this->rule.blur
@@ -1545,7 +1490,7 @@ PanelBlur::ShapeInputs PanelBlur::shapeInputs(bool shown) const {
 }
 
 void PanelBlur::updateShapes() {
-	if (!this->active) return;
+	if (!this->active || this->suspended) return;
 
 	auto shown = this->panelShown();
 	auto inputs = this->shapeInputs(shown);
@@ -1623,8 +1568,11 @@ void PanelBlur::syncPlacement() {
 	this->panelWasShown = shown;
 	if (this->backdrop == nullptr) return;
 
-	if (!shown || !this->active || this->stale || this->shapes.isEmpty()) this->backdrop->hide();
-	else this->backdrop->show();
+	if (!shown || !this->active || this->suspended || this->stale || this->shapes.isEmpty()) {
+		this->backdrop->hide();
+	} else {
+		this->backdrop->show();
+	}
 }
 
 void PanelBlur::collectShapes(QList<BlurShape>& shapes) {
@@ -1654,6 +1602,12 @@ BackdropBlur::BackdropBlur(QObject* parent): QObject(parent) {
 		QObject::connect(manager, &BlurManager::stateChanged, this, &BackdropBlur::stateChanged);
 		QObject::connect(manager, &BlurManager::rulesChanged, this, &BackdropBlur::rulesChanged);
 		// clang-format on
+		QObject::connect(
+		    manager,
+		    &BlurManager::panelAnimationsChanged,
+		    this,
+		    &BackdropBlur::panelAnimationsChanged
+		);
 	}
 }
 
@@ -1679,6 +1633,15 @@ void BackdropBlur::setEnabled(bool enabled) {
 bool BackdropBlur::available() {
 	auto* manager = BlurManager::instance();
 	return manager != nullptr && manager->available();
+}
+
+bool BackdropBlur::panelAnimations() {
+	auto* manager = BlurManager::instance();
+	return manager == nullptr || manager->panelAnimations();
+}
+
+void BackdropBlur::setPanelAnimations(bool enabled) {
+	if (auto* manager = BlurManager::instance()) manager->setPanelAnimations(enabled);
 }
 
 QString BackdropBlur::configPath() {

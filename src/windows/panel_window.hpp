@@ -1,5 +1,8 @@
 #pragma once
 
+#include <memory>
+#include <optional>
+
 #include <qt_windows.h>
 
 #include <qbytearray.h>
@@ -17,12 +20,15 @@
 #include <qtclasshelpermacros.h>
 #include <qtmetamacros.h>
 #include <qtypes.h>
+#include <qvariant.h>
+#include <qvariantanimation.h>
 
 #include "../core/doc.hpp"
 #include "../core/util.hpp"
 #include "../window/panelinterface.hpp"
 #include "../window/proxywindow.hpp"
 #include "appbar.hpp"
+#include "panel_animation.hpp"
 
 namespace qs::wayland::layershell {
 class WlrLayershell;
@@ -94,7 +100,10 @@ public:
 	void trySetWidth(qint32 implicitWidth) override;
 	void trySetHeight(qint32 implicitHeight) override;
 
+	void onReload(QObject* oldInstance) override;
+
 	void setScreen(QuickshellScreenInfo* screen) override;
+	[[nodiscard]] bool isVisibleDirect() const override;
 	void setVisibleDirect(bool visible) override;
 
 	[[nodiscard]] Anchors anchors() const { return this->bAnchors; }
@@ -147,6 +156,7 @@ signals:
 
 protected:
 	void applyInputMask(const QRegion& region, bool hasMask) override;
+	void onPolished() override;
 
 private slots:
 	void onSurfaceCreated();
@@ -158,6 +168,8 @@ private slots:
 	void onScreenScaleChanged();
 	void updateDimensions();
 	void onWindowExposed();
+	void onAnimationTick(const QVariant& value);
+	void onAnimationFinished();
 
 private:
 	[[nodiscard]] HWND hwnd() const;
@@ -191,6 +203,18 @@ private:
 	[[nodiscard]] QRect embeddedRect() const;
 	void onWindowScreenChanged();
 	void recreateDestroyedWindow();
+	[[nodiscard]] bool animationsAllowed() const;
+	[[nodiscard]] std::optional<PanelAnimationStyle> animationStyle() const;
+	[[nodiscard]] Qt::Edge slideEdge(const PanelAnimationStyle& style) const;
+	void prepareShowAnimation(const PanelAnimationStyle& style);
+	void runAnimation(bool show);
+	void applyAnimationFrame();
+	void resetAnimation();
+	void beginClose(const PanelAnimationStyle& style);
+	void reopen();
+	void hideAfterLastFrames();
+	void finishClose();
+	void releaseForegroundForClose();
 
 	QPointer<QScreen> mTrackedScreen;
 	WinAppBar appBar;
@@ -226,6 +250,17 @@ private:
 	bool screenRestorePending = false;
 	HWND destroyedHwnd = nullptr;
 	bool visibleWhenDestroyed = false;
+
+	QVariantAnimation* mAnimation = nullptr;
+	std::unique_ptr<PanelContentTransform> mContentTransform;
+	PanelAnimation mAnimationState;
+	PanelAnimationStyle mAnimationStyle;
+	Qt::Edge mAnimationEdge = Qt::TopEdge;
+	QMetaObject::Connection mCloseFrames;
+	quint32 mCloseRequest = 0;
+	int mFramesBeforeHide = 0;
+	bool mClosing = false;
+	bool mInstantVisibility = false;
 
 	// clang-format off
 	Q_OBJECT_BINDABLE_PROPERTY_WITH_ARGS(WinPanelWindow, PanelLayer, bLayer, PanelLayer::Top, &WinPanelWindow::layerChanged);

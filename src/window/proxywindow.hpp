@@ -201,6 +201,7 @@ protected:
 	bool reloadComplete = false;
 	bool ranLints = false;
 	bool mUpdatesEnabled = true;
+	bool quietVisibilityChange = false;
 	QsSurfaceFormat qsSurfaceFormat;
 	QSurfaceFormat mSurfaceFormat;
 
