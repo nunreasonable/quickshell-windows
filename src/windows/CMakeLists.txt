@@ -38,6 +38,7 @@ qt_add_library(quickshell-windows STATIC
 	system/night_light.cpp
 	system/gamma.cpp
 	system/screenshot.cpp
+	system/screenshot_jobs.cpp
 	system/notification_settings.cpp
 	system/account_age.cpp
 	system/idle_power.cpp

@@ -28,3 +28,11 @@ target_compile_definitions(panel_animation_test PRIVATE
 	QS_WINDOWS_SHADER_QSB="${QS_WINDOWS_SRC}/shaders/panel_effect.frag.qsb"
 )
 target_link_libraries(panel_animation_test PRIVATE Qt6::Quick Qt6::Qml Qt6::Test Qt6::GuiPrivate)
+
+qt_add_executable(screenshot_jobs_test
+	screenshot_jobs_test.cpp
+	${QS_WINDOWS_SRC}/system/screenshot_jobs.cpp
+)
+
+target_include_directories(screenshot_jobs_test PRIVATE ${QS_WINDOWS_SRC}/system)
+target_link_libraries(screenshot_jobs_test PRIVATE Qt6::Gui Qt6::Test)

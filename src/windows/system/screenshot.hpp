@@ -3,7 +3,6 @@
 #include <qdatetime.h>
 #include <qfileinfo.h>
 #include <qhash.h>
-#include <qset.h>
 #include <qimage.h>
 #include <qobject.h>
 #include <qqmlintegration.h>
@@ -11,6 +10,8 @@
 #include <qtimer.h>
 #include <qtmetamacros.h>
 #include <qtypes.h>
+
+#include "screenshot_jobs.hpp"
 
 namespace qs::windows::sys {
 
@@ -32,6 +33,7 @@ public:
 	Q_INVOKABLE QString pixelAt(const QString& path, int x, int y);
 	Q_INVOKABLE void releasePixels();
 	Q_INVOKABLE void releaseCapture(const QString& path);
+	Q_INVOKABLE void discardCapture(const QString& path);
 
 signals:
 	void captureFinished(int requestId, bool ok);
@@ -43,7 +45,7 @@ private:
 		qint64 size = -1;
 	};
 
-	void finishCaptureRequest(int requestId, bool ok, const QString& path, const QImage& image);
+	void finishCaptureRequest(int requestId, bool ok, const QImage& image);
 	bool loadPixels(const QString& path);
 	void keepCapture(const QString& path, const QImage& image);
 	QImage takeCapture(const QFileInfo& info);
@@ -55,9 +57,7 @@ private:
 
 	QHash<QString, KeptCapture> captures;
 	QTimer capturesExpiry;
-	QSet<int> pendingRequests;
-	QSet<int> cancelledRequests;
-	int nextRequestId = 1;
+	ScreenshotJobs jobs;
 };
 
 } // namespace qs::windows::sys

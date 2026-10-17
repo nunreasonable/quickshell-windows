@@ -5,6 +5,7 @@
 #include <qcolor.h>
 #include <qdatetime.h>
 #include <qdir.h>
+#include <qfile.h>
 #include <qfileinfo.h>
 #include <qcoreapplication.h>
 #include <qguiapplication.h>
@@ -102,6 +103,8 @@ bool Screenshot::captureScreen(const QString& screenName, const QString& path) {
 		return false;
 	}
 
+	this->jobs.supersede(path);
+
 	if (!result.save(path, "PNG", PNG_QUALITY)) {
 		qCWarning(logScreenshot) << "Cannot write" << path;
 		return false;
@@ -138,16 +141,20 @@ int Screenshot::captureScreenAsync(const QString& screenName, const QString& pat
 	}
 
 	capture::CaptureThread::instance();
-	auto id = this->nextRequestId++;
-	this->pendingRequests.insert(id);
+	auto job = this->jobs.start(localPath(path));
 
-	QThreadPool::globalInstance()->start([self = QPointer(this), id, targets, path]() {
+	QThreadPool::globalInstance()->start([self = QPointer(this), job, targets]() {
 		QImage result;
 		QRect bounds;
 		QList<QPair<QPoint, QImage>> shots;
 		auto ok = true;
 
 		for (const auto& target: targets) {
+			if (job.isCancelled()) {
+				ok = false;
+				break;
+			}
+
 			auto image = capture::CaptureThread::instance()->grabMonitor(target.monitor, CAPTURE_TIMEOUT_MS);
 			if (image.isNull()) {
 				qCWarning(logScreenshot) << "Capturing" << target.name << "timed out or failed";
@@ -159,7 +166,7 @@ int Screenshot::captureScreenAsync(const QString& screenName, const QString& pat
 			shots.append({target.topLeft, image});
 		}
 
-		if (ok) {
+		if (ok && !job.isCancelled()) {
 			if (shots.size() == 1) {
 				result = shots.first().second;
 			} else {
@@ -169,41 +176,37 @@ int Screenshot::captureScreenAsync(const QString& screenName, const QString& pat
 				for (const auto& [topLeft, image]: shots) painter.drawImage(topLeft - bounds.topLeft(), image);
 			}
 
-			auto info = QFileInfo(path);
-			if (!QDir().mkpath(info.absolutePath())) {
-				qCWarning(logScreenshot) << "Cannot create" << info.absolutePath();
-				ok = false;
-			} else if (!result.save(path, "PNG", PNG_QUALITY)) {
-				qCWarning(logScreenshot) << "Cannot write" << path;
-				ok = false;
-			}
+			ok = ScreenshotJobs::write(job, result, PNG_QUALITY);
+		} else {
+			ok = false;
 		}
 
 		auto* app = QCoreApplication::instance();
-		if (app == nullptr) return;
+		if (app == nullptr) {
+			QFile::remove(job.partPath);
+			return;
+		}
 
 		QMetaObject::invokeMethod(
 		    app,
-		    [self, id, ok, path, result]() {
-			    if (self) self->finishCaptureRequest(id, ok, path, result);
+		    [self, job, ok, result]() {
+			    if (self) self->finishCaptureRequest(job.id, ok, result);
+			    else QFile::remove(job.partPath);
 		    },
 		    Qt::QueuedConnection
 		);
 	});
 
-	return id;
+	return job.id;
 }
 
-void Screenshot::finishCaptureRequest(int requestId, bool ok, const QString& path, const QImage& image) {
-	this->pendingRequests.remove(requestId);
-	auto cancelled = this->cancelledRequests.remove(requestId);
-	if (ok && !cancelled) this->keepCapture(path, image);
-	emit this->captureFinished(requestId, ok && !cancelled);
+void Screenshot::finishCaptureRequest(int requestId, bool ok, const QImage& image) {
+	auto path = this->jobs.finish(requestId, ok);
+	if (!path.isEmpty()) this->keepCapture(path, image);
+	emit this->captureFinished(requestId, !path.isEmpty());
 }
 
-void Screenshot::cancelCapture(int requestId) {
-	if (this->pendingRequests.contains(requestId)) this->cancelledRequests.insert(requestId);
-}
+void Screenshot::cancelCapture(int requestId) { this->jobs.cancel(requestId); }
 
 bool Screenshot::cropToFile(
     const QString& srcPath,
@@ -237,6 +240,7 @@ bool Screenshot::cropToFile(
 	}
 
 	this->captures.remove(info.absoluteFilePath());
+	this->jobs.supersede(dstPath);
 
 	if (!cropped.save(dstPath, "PNG", PNG_QUALITY)) {
 		qCWarning(logScreenshot) << "Cannot write" << dstPath;
@@ -305,6 +309,11 @@ QImage Screenshot::takeCapture(const QFileInfo& info) {
 void Screenshot::releaseCapture(const QString& path) {
 	this->captures.remove(QFileInfo(localPath(path)).absoluteFilePath());
 	if (this->captures.isEmpty()) this->capturesExpiry.stop();
+}
+
+void Screenshot::discardCapture(const QString& path) {
+	this->releaseCapture(path);
+	this->jobs.discard(localPath(path));
 }
 
 void Screenshot::releasePixels() {
