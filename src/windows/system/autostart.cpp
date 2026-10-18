@@ -551,7 +551,10 @@ bool Autostart::setSelfStartup(bool enabled, const QString& method) {
 	} else if (method == QStringLiteral("run")) {
 		ok = writeRun();
 		if (ok) {
-			ok = deleteSelfTask(error);
+			QString taskError;
+			if (!deleteSelfTask(taskError)) {
+				qCWarning(logAutostart) << "Couldn't delete the old scheduled task:" << taskError;
+			}
 		} else {
 			error = hrText(HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED));
 		}
