@@ -19,7 +19,9 @@
 
 #include <dxcore.h>
 #include <dxgi1_2.h>
+#if defined(_M_X64) || defined(_M_IX86)
 #include <intrin.h>
+#endif
 #include <pdh.h>
 #include <pdhmsg.h>
 #include <powrprof.h>
@@ -440,6 +442,7 @@ void readBoard(SystemMonitorStaticInfo& info) {
 }
 
 void readCpuid(SystemMonitorStaticInfo& info) {
+#if defined(_M_X64) || defined(_M_IX86)
 	auto previous = SetThreadAffinityMask(GetCurrentThread(), 1);
 
 	int regs[4] {};
@@ -459,6 +462,9 @@ void readCpuid(SystemMonitorStaticInfo& info) {
 	}
 
 	if (previous != 0) SetThreadAffinityMask(GetCurrentThread(), previous);
+#else
+	Q_UNUSED(info);
+#endif
 }
 
 void readCpu(SystemMonitorStaticInfo& info) {
