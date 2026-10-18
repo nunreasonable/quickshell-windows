@@ -59,6 +59,40 @@ readRegistryBinary(HKEY root, const wchar_t* subkey, const wchar_t* name, REGSAM
 	return buffer;
 }
 
+bool writeRegistryString(
+    HKEY root,
+    const wchar_t* subkey,
+    const wchar_t* name,
+    const QString& value,
+    REGSAM extraFlags
+) {
+	HKEY key = nullptr;
+	auto result = RegCreateKeyExW(
+	    root,
+	    subkey,
+	    0,
+	    nullptr,
+	    0,
+	    KEY_SET_VALUE | extraFlags,
+	    nullptr,
+	    &key,
+	    nullptr
+	);
+	if (result != ERROR_SUCCESS) return false;
+
+	auto wide = value.toStdWString();
+	auto ok = RegSetValueExW(
+	    key,
+	    name,
+	    0,
+	    REG_SZ,
+	    reinterpret_cast<const BYTE*>(wide.c_str()),
+	    static_cast<DWORD>((wide.size() + 1) * sizeof(wchar_t))
+	);
+	RegCloseKey(key);
+	return ok == ERROR_SUCCESS;
+}
+
 bool writeRegistryBinary(
     HKEY root,
     const wchar_t* subkey,

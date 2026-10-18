@@ -14,6 +14,13 @@ struct RegistryValue {
 
 QString readRegistryString(HKEY root, const wchar_t* subkey, const wchar_t* name, REGSAM extraFlags = 0);
 QByteArray readRegistryBinary(HKEY root, const wchar_t* subkey, const wchar_t* name, REGSAM extraFlags = 0);
+bool writeRegistryString(
+    HKEY root,
+    const wchar_t* subkey,
+    const wchar_t* name,
+    const QString& value,
+    REGSAM extraFlags = 0
+);
 bool writeRegistryBinary(
     HKEY root,
     const wchar_t* subkey,
