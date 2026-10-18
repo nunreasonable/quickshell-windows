@@ -3,7 +3,9 @@
 #include <utility>
 
 #include <qcontainerfwd.h>
+#include <qdesktopservices.h>
 #include <qfileinfo.h>
+#include <qhash.h>
 #include <qjsonarray.h>
 #include <qjsondocument.h>
 #include <qlogging.h>
@@ -13,6 +15,7 @@
 #include <qtimer.h>
 #include <qtmetamacros.h>
 #include <qtypes.h>
+#include <qurl.h>
 
 #include "../../../core/desktopentry.hpp"
 #include "../../../core/instanceinfo.hpp"
@@ -33,6 +36,20 @@ namespace {
 constexpr auto BUS_CLASS = L"QuickshellNotificationBus";
 constexpr auto BUS_MUTEX = L"Local\\quickshell-notification-bus";
 constexpr ULONG_PTR NOTIFY_SEND_MAGIC = 0x514e5331;
+
+QString systemUriFor(const QString& aumid) {
+	static const QHash<QString, QString> uris {
+	    {QStringLiteral("windows.defender.securitycenter"), QStringLiteral("windowsdefender:")},
+	};
+	return uris.value(aumid.toLower());
+}
+
+bool hasWindowFor(const QString& aumid) {
+	for (auto* window: qs::windows::WindowTracker::instance()->windows()) {
+		if (window->appId().compare(aumid, Qt::CaseInsensitive) == 0) return true;
+	}
+	return false;
+}
 } // namespace
 
 NotificationServer* NotificationServer::instance() {
@@ -349,7 +366,23 @@ void NotificationServer::activateApp(const QString& aumid, const QString& deskto
 	               ? QString()
 	               : qs::windows::WindowsDesktopEntryBackend::parsingNameForId(desktopEntry);
 
-	qs::windows::WindowsDesktopEntryBackend::launch(token.isEmpty() ? aumid : token);
+	if (token.isEmpty()
+	    && !qs::windows::WindowsDesktopEntryBackend::idForParsingName(aumid).isEmpty())
+	{
+		token = aumid;
+	}
+
+	if (token.isEmpty()) {
+		auto uri = systemUriFor(aumid);
+		if (!uri.isEmpty()) {
+			QDesktopServices::openUrl(QUrl(uri));
+		} else {
+			qCDebug(logNotifications) << "No app to open for a notification from" << aumid;
+		}
+		return;
+	}
+
+	qs::windows::WindowsDesktopEntryBackend::launch(token);
 }
 
 ToastMirror* NotificationServer::mirror() {
@@ -409,6 +442,12 @@ void NotificationServer::onToastAdded(const ToastSnapshot& toast) {
 	qCDebug(logNotifications) << "Mirroring toast" << toast.id << "from" << toast.aumid
 	                          << "entry" << desktopEntry;
 
+	auto actions = QStringList();
+	auto canOpen = !desktopEntry.isEmpty() || !systemUriFor(toast.aumid).isEmpty();
+	if (canOpen || hasWindowFor(toast.aumid)) {
+		actions = {QStringLiteral("default"), QStringLiteral("Open")};
+	}
+
 	this->deliver(
 	    0,
 	    0,
@@ -416,7 +455,7 @@ void NotificationServer::onToastAdded(const ToastSnapshot& toast) {
 	    toast.logoPath,
 	    toast.summary,
 	    toast.body.toHtmlEscaped(),
-	    {QStringLiteral("default"), QStringLiteral("Open")},
+	    actions,
 	    hints,
 	    -1,
 	    toast.id,
