@@ -22,6 +22,7 @@ public:
 
 	static QString parsingNameForId(const QString& id);
 	static QString idForParsingName(const QString& token);
+	static QString linkTargetForId(const QString& id);
 	static void launch(const QString& token, const QString& workingDirectory = QString());
 
 	static void noteWindowExe(const QString& appId, const QString& exePath);
@@ -31,6 +32,7 @@ private:
 	static QMutex sRegistryMutex;
 	static QHash<QString, QString> sRegistry;
 	static QHash<QString, QString> sTargets;
+	static QHash<QString, QString> sLinkTargets;
 	static QHash<QString, QString> sExeNames;
 	static QMutex sWindowExeMutex;
 	static QHash<QString, QString> sWindowExes;

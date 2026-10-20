@@ -72,9 +72,10 @@ QString linkTarget(const ComPtr<IShellItem>& item) {
 } // namespace
 
 QMutex WindowsDesktopEntryBackend::sRegistryMutex;
-QHash<QString, QString> WindowsDesktopEntryBackend::sRegistry;  // NOLINT
-QHash<QString, QString> WindowsDesktopEntryBackend::sTargets;   // NOLINT
-QHash<QString, QString> WindowsDesktopEntryBackend::sExeNames;  // NOLINT
+QHash<QString, QString> WindowsDesktopEntryBackend::sRegistry;    // NOLINT
+QHash<QString, QString> WindowsDesktopEntryBackend::sTargets;     // NOLINT
+QHash<QString, QString> WindowsDesktopEntryBackend::sLinkTargets; // NOLINT
+QHash<QString, QString> WindowsDesktopEntryBackend::sExeNames;    // NOLINT
 QMutex WindowsDesktopEntryBackend::sWindowExeMutex;
 QHash<QString, QString> WindowsDesktopEntryBackend::sWindowExes; // NOLINT
 
@@ -126,6 +127,11 @@ QString WindowsDesktopEntryBackend::idForParsingName(const QString& token) {
 	}
 
 	return QString();
+}
+
+QString WindowsDesktopEntryBackend::linkTargetForId(const QString& id) {
+	QMutexLocker locker(&WindowsDesktopEntryBackend::sRegistryMutex);
+	return WindowsDesktopEntryBackend::sLinkTargets.value(id);
 }
 
 void WindowsDesktopEntryBackend::install() {
@@ -182,6 +188,7 @@ QList<ParsedDesktopEntryData> WindowsDesktopEntryBackend::scan() {
 
 	auto registry = QHash<QString, QString>();
 	auto targets = QHash<QString, QString>();
+	auto linkTargets = QHash<QString, QString>();
 	auto exeNames = QHash<QString, QString>();
 
 	ComPtr<IShellItem> item;
@@ -242,6 +249,7 @@ QList<ParsedDesktopEntryData> WindowsDesktopEntryBackend::scan() {
 		results.append(std::move(data));
 
 		auto target = linkTarget(current);
+		if (!target.isEmpty()) linkTargets.insert(id, target);
 		if (!exeNameOf(target).isEmpty() && !targets.contains(normalizedExe(target))) {
 			targets.insert(normalizedExe(target), id);
 		}
@@ -256,6 +264,7 @@ QList<ParsedDesktopEntryData> WindowsDesktopEntryBackend::scan() {
 		QMutexLocker locker(&WindowsDesktopEntryBackend::sRegistryMutex);
 		WindowsDesktopEntryBackend::sRegistry = registry;
 		WindowsDesktopEntryBackend::sTargets = targets;
+		WindowsDesktopEntryBackend::sLinkTargets = linkTargets;
 		WindowsDesktopEntryBackend::sExeNames = exeNames;
 	}
 

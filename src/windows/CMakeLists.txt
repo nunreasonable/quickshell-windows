@@ -57,6 +57,7 @@ qt_add_library(quickshell-windows STATIC
 	system/shell_link.cpp
 	system/webapps.cpp
 	system/autostart.cpp
+	system/app_actions.cpp
 	system/calendar_ics.cpp
 	system/calendar_events.cpp
 	system/displays.cpp
