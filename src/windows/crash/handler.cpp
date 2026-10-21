@@ -96,6 +96,7 @@ void writeSupportingFiles(const wchar_t* reason, DWORD exceptionCode) {
 
 void relaunch(const wchar_t* reason) {
 	SetEnvironmentVariableW(L"QS_DEBUG_CRASH_TEST", nullptr);
+	SetEnvironmentVariableW(L"QS_DEBUG_CRASH_DELAY_MS", nullptr);
 
 	SetEnvironmentVariableW(L"__QUICKSHELL_CRASH_RELAUNCH", L"1");
 	SetEnvironmentVariableW(L"__QUICKSHELL_CRASH_LAUNCH_TIME", gLaunchTimeStr);

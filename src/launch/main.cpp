@@ -44,6 +44,11 @@ void checkCrashRelaunch(char** argv) {
 		                      << qEnvironmentVariable("__QUICKSHELL_CRASH_REASON") << "). Dump saved to "
 		                      << qEnvironmentVariable("__QUICKSHELL_CRASH_DUMP_PATH");
 
+		qunsetenv("__QUICKSHELL_CRASH_RELAUNCH");
+		qunsetenv("__QUICKSHELL_CRASH_LAUNCH_TIME");
+		qunsetenv("__QUICKSHELL_CRASH_REASON");
+		qunsetenv("__QUICKSHELL_CRASH_DUMP_PATH");
+
 		if (launchTimeMs != 0 && nowMs - launchTimeMs < 10000) {
 			qCritical() << "Quickshell crashed within 10 seconds of launching. Not restarting to avoid "
 			               "a crash loop.";
