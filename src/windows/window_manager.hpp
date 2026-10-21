@@ -33,6 +33,7 @@ public:
 	[[nodiscard]] qsizetype previousDesktop() const;
 	void prepareWarp(qsizetype desktop, bool fromActive = false);
 	void warpToActive();
+	void expectFocus(qsizetype desktop);
 
 signals:
 	void backAndForthChanged();
@@ -47,6 +48,7 @@ private:
 	void cancelWarp();
 	void warpToTopmost();
 	void watchTracker();
+	void repairFocus();
 	[[nodiscard]] static bool cursorOverShell();
 	static void warpCursor(HWND hwnd);
 
@@ -65,6 +67,9 @@ private:
 	qint64 warpDeadline = 0;
 	QPointer<TrackedWindow> warpFrom;
 	QTimer fallbackTimer;
+
+	qsizetype focusDesktop = -1;
+	QTimer focusTimer;
 };
 
 class WindowManager: public QObject {

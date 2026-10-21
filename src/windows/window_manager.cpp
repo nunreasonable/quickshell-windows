@@ -1,8 +1,11 @@
 #include "window_manager.hpp"
+#include <cwchar>
 
 #include <qcolor.h>
 #include <qcoreapplication.h>
 #include <qdatetime.h>
+#include <qlogging.h>
+#include <qloggingcategory.h>
 #include <qobject.h>
 #include <qpointer.h>
 #include <qstring.h>
@@ -19,10 +22,26 @@ namespace qs::windows {
 
 namespace {
 
+Q_LOGGING_CATEGORY(logWorkspace, "quickshell.windows.workspace", QtWarningMsg);
+
 constexpr qint64 WARP_TIMEOUT_MS = 2000;
 constexpr int WARP_FALLBACK_MS = 500;
+constexpr int FOCUS_REPAIR_MS = 150;
 
 bool isNullGuid(const GUID& id) { return IsEqualGUID(id, GUID {}) != FALSE; }
+
+bool isCloaked(HWND hwnd) {
+	DWORD cloaked = 0;
+	return SUCCEEDED(DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked)))
+	    && cloaked != 0;
+}
+
+bool isDesktopWindow(HWND hwnd) {
+	if (hwnd == GetShellWindow()) return true;
+	wchar_t name[16] {};
+	GetClassNameW(hwnd, name, 16);
+	return wcscmp(name, L"WorkerW") == 0 || wcscmp(name, L"Progman") == 0;
+}
 
 } // namespace
 
@@ -55,6 +74,10 @@ WorkspaceBehavior::WorkspaceBehavior(QObject* parent)
 	this->fallbackTimer.setSingleShot(true);
 	this->fallbackTimer.setInterval(WARP_FALLBACK_MS);
 	QObject::connect(&this->fallbackTimer, &QTimer::timeout, this, &WorkspaceBehavior::warpToTopmost);
+
+	this->focusTimer.setSingleShot(true);
+	this->focusTimer.setInterval(FOCUS_REPAIR_MS);
+	QObject::connect(&this->focusTimer, &QTimer::timeout, this, &WorkspaceBehavior::repairFocus);
 }
 
 void WorkspaceBehavior::setBackAndForth(bool enabled) {
@@ -184,6 +207,50 @@ void WorkspaceBehavior::warpToActive() {
 	if (desktop != -1 && desktop != this->desktops->currentIndex()) return;
 
 	WorkspaceBehavior::warpCursor(window->hwnd());
+}
+
+void WorkspaceBehavior::expectFocus(qsizetype desktop) {
+	this->focusDesktop = desktop;
+	this->focusTimer.start();
+}
+
+void WorkspaceBehavior::repairFocus() {
+	auto desktop = this->focusDesktop;
+	this->focusDesktop = -1;
+	if (desktop < 0 || this->desktops->currentIndex() != desktop) return;
+
+	auto* foreground = GetForegroundWindow();
+	if (foreground != nullptr && isOwnProcessWindow(foreground)) return;
+	if (foreground != nullptr && !isCloaked(foreground) && !isDesktopWindow(foreground)) return;
+
+	this->watchTracker();
+
+	struct Search {
+		WindowTracker* tracker = nullptr;
+		HWND found = nullptr;
+	} search {.tracker = this->tracker};
+
+	EnumWindows(
+	    [](HWND hwnd, LPARAM param) -> BOOL {
+		    auto* search = reinterpret_cast<Search*>(param); // NOLINT(performance-no-int-to-ptr)
+		    if (search->tracker->windowFor(hwnd) == nullptr || IsIconic(hwnd) || isCloaked(hwnd)) {
+			    return TRUE;
+		    }
+
+		    search->found = hwnd;
+		    return FALSE;
+	    },
+	    reinterpret_cast<LPARAM>(&search)
+	);
+
+	if (search.found == nullptr) search.found = GetShellWindow();
+	if (search.found == nullptr || search.found == foreground) return;
+
+	auto ok = forceForegroundWindow(search.found);
+	this->tracker->refreshForeground();
+	qCDebug(logWorkspace) << "Nothing on this desktop had focus after a desktop change, moved it to"
+	                      << search.found << (ok ? "" : "(failed)");
+	if (!ok) qCWarning(logWorkspace) << "Couldn't move focus off a window on another desktop";
 }
 
 bool WorkspaceBehavior::cursorOverShell() {

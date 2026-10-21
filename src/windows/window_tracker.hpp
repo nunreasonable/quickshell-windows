@@ -142,6 +142,7 @@ public:
 	[[nodiscard]] static qsizetype screenIndex(QScreen* screen);
 
 	void rescan();
+	void refreshForeground();
 	void noteMoveSize(HWND hwnd, bool started);
 
 signals:

@@ -124,9 +124,14 @@ void launchCommandLine(const QString& line) {
 
 void moveWindowTo(TrackedWindow* window, qsizetype index, bool follow) {
 	if (!window->moveToDesktop(index)) return;
-	if (!follow) return;
 
-	WorkspaceBehavior::instance()->prepareWarp(index, true);
+	auto* behavior = WorkspaceBehavior::instance();
+	if (!follow) {
+		behavior->expectFocus(VirtualDesktops::instance()->currentIndex());
+		return;
+	}
+
+	behavior->prepareWarp(index, true);
 	window->activate();
 }
 
@@ -484,6 +489,7 @@ void Dispatcher::focusWorkspace(const QString& arg) {
 		desktops->ensureCount(index + 1, [desktops, index](bool ok) {
 			if (!ok) return;
 			WorkspaceBehavior::instance()->prepareWarp(index);
+			WorkspaceBehavior::instance()->expectFocus(index);
 			desktops->switchTo(index);
 		});
 
@@ -491,6 +497,7 @@ void Dispatcher::focusWorkspace(const QString& arg) {
 	}
 
 	behavior->prepareWarp(index);
+	behavior->expectFocus(index);
 	desktops->switchTo(index);
 }
 

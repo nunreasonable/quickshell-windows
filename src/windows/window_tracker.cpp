@@ -794,14 +794,27 @@ void WindowTracker::updateActive() {
 	}
 
 	auto* window = this->byHwnd.value(foreground);
-	if (window == nullptr && isOwnProcessWindow(foreground) && !this->isEligible(foreground)) return;
+	if (window == nullptr && isOwnProcessWindow(foreground) && !this->isEligible(foreground)) {
+		if (this->mActive != nullptr && !isShown(this->mActive->hwnd())) this->setActive(nullptr);
+		return;
+	}
 
 	if (window == nullptr && this->isEligible(foreground)) {
 		this->addWindow(foreground);
 		window = this->byHwnd.value(foreground);
 	}
 
+	if (window != nullptr && !isShown(foreground)) {
+		qCDebug(logTracker) << "Foreground" << window->addressHex() << "is on another desktop";
+		window = nullptr;
+	}
+
 	this->setActive(window);
+}
+
+void WindowTracker::refreshForeground() {
+	this->foregroundDirty = true;
+	this->schedule();
 }
 
 void WindowTracker::setActive(TrackedWindow* window) {

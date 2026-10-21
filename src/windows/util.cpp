@@ -145,6 +145,11 @@ bool forceForegroundWindow(HWND hwnd) {
 	if (GetForegroundWindow() == hwnd) return true;
 	if (SetForegroundWindow(hwnd)) return true;
 
+	INPUT input {};
+	input.type = INPUT_MOUSE;
+	input.mi.dwFlags = MOUSEEVENTF_MOVE;
+	if (SendInput(1, &input, sizeof(input)) == 1 && SetForegroundWindow(hwnd)) return true;
+
 	auto* foreground = GetForegroundWindow();
 	auto foregroundThread =
 	    foreground == nullptr ? 0 : GetWindowThreadProcessId(foreground, nullptr);
