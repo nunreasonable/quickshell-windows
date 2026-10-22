@@ -212,12 +212,32 @@ void GsmtcWorker::addSession(const GlobalSystemMediaTransportControlsSession& se
 	auto desktopEntry = mappedIdentity.second;
 	auto dbusName = QStringLiteral("gsmtc:") + aumid + QStringLiteral("#") + QString::number(id);
 
-	auto playback = this->buildPlaybackSnapshot(session);
-	auto timeline = this->buildTimelineSnapshot(session);
+	auto playback = this->buildPlaybackSnapshot(session).value_or(MprisPlayer::PlaybackSnapshot {
+	    .state = MprisPlaybackState::Stopped,
+	    .canPlay = false,
+	    .canPause = false,
+	    .canSeek = false,
+	    .canGoNext = false,
+	    .canGoPrevious = false,
+	    .canControl = false,
+	    .shuffle = false,
+	    .shuffleSupported = false,
+	    .loopState = MprisLoopState::None,
+	    .loopSupported = false,
+	    .rate = 1.0,
+	});
+	auto timeline = this->buildTimelineSnapshot(session).value_or(MprisPlayer::TimelineSnapshot {
+	    .basePositionTicks = 0,
+	    .baseTimestamp = {},
+	    .lengthTicks = 0,
+	    .lengthSupported = false,
+	    .positionSupported = false,
+	});
 
 	MprisPlayer::MediaSnapshot media {0, {}, {}, {}, {}, {}};
 	try {
 		auto props = session.TryGetMediaPropertiesAsync().get();
+		if (!props) winrt::throw_hresult(winrt::hresult(static_cast<int32_t>(0x80004003)));
 		auto title = toQString(props.Title());
 		auto artist = toQString(props.Artist());
 		auto album = toQString(props.AlbumTitle());
@@ -267,11 +287,13 @@ void GsmtcWorker::removeSession(quint64 sessionId) {
 	);
 }
 
-MprisPlayer::PlaybackSnapshot GsmtcWorker::buildPlaybackSnapshot(
+std::optional<MprisPlayer::PlaybackSnapshot> GsmtcWorker::buildPlaybackSnapshot(
     const GlobalSystemMediaTransportControlsSession& session
-) const {
+) const try {
 	auto info = session.GetPlaybackInfo();
+	if (!info) return std::nullopt;
 	auto controls = info.Controls();
+	if (!controls) return std::nullopt;
 
 	auto shuffleSupported = false;
 	auto shuffle = false;
@@ -312,12 +334,16 @@ MprisPlayer::PlaybackSnapshot GsmtcWorker::buildPlaybackSnapshot(
 	    .loopSupported = loopSupported,
 	    .rate = rate,
 	};
+} catch (const winrt::hresult_error& e) {
+	qCDebug(logMprisWorker) << "Reading playback info failed:" << Qt::hex << static_cast<uint32_t>(e.code().value);
+	return std::nullopt;
 }
 
-MprisPlayer::TimelineSnapshot GsmtcWorker::buildTimelineSnapshot(
+std::optional<MprisPlayer::TimelineSnapshot> GsmtcWorker::buildTimelineSnapshot(
     const GlobalSystemMediaTransportControlsSession& session
-) const {
+) const try {
 	auto timeline = session.GetTimelineProperties();
+	if (!timeline) return std::nullopt;
 
 	auto startTicks = timeline.StartTime().count();
 	auto endTicks = timeline.EndTime().count();
@@ -331,6 +357,9 @@ MprisPlayer::TimelineSnapshot GsmtcWorker::buildTimelineSnapshot(
 	    .lengthSupported = lengthSupported,
 	    .positionSupported = true,
 	};
+} catch (const winrt::hresult_error& e) {
+	qCDebug(logMprisWorker) << "Reading the timeline failed:" << Qt::hex << static_cast<uint32_t>(e.code().value);
+	return std::nullopt;
 }
 
 void GsmtcWorker::refreshPlaybackInfo(quint64 sessionId) {
@@ -338,9 +367,10 @@ void GsmtcWorker::refreshPlaybackInfo(quint64 sessionId) {
 	if (it == this->mEntries.end()) return;
 
 	auto snapshot = this->buildPlaybackSnapshot(it->second->session);
+	if (!snapshot) return;
 	QMetaObject::invokeMethod(
 	    QCoreApplication::instance(),
-	    [frontend = this->mFrontend, sessionId, snapshot] {
+	    [frontend = this->mFrontend, sessionId, snapshot = *snapshot] {
 		    if (frontend) frontend->backendUpdatePlaybackInfo(sessionId, snapshot);
 	    },
 	    Qt::QueuedConnection
@@ -352,9 +382,10 @@ void GsmtcWorker::refreshTimeline(quint64 sessionId) {
 	if (it == this->mEntries.end()) return;
 
 	auto snapshot = this->buildTimelineSnapshot(it->second->session);
+	if (!snapshot) return;
 	QMetaObject::invokeMethod(
 	    QCoreApplication::instance(),
-	    [frontend = this->mFrontend, sessionId, snapshot] {
+	    [frontend = this->mFrontend, sessionId, snapshot = *snapshot] {
 		    if (frontend) frontend->backendUpdateTimeline(sessionId, snapshot);
 	    },
 	    Qt::QueuedConnection
@@ -408,6 +439,7 @@ void GsmtcWorker::refreshMediaProperties(quint64 sessionId) {
 
 	try {
 		auto props = entry.session.TryGetMediaPropertiesAsync().get();
+		if (!props) winrt::throw_hresult(winrt::hresult(static_cast<int32_t>(0x80004003)));
 		auto title = toQString(props.Title());
 		auto artist = toQString(props.Artist());
 		auto album = toQString(props.AlbumTitle());

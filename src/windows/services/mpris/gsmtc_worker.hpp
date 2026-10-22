@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <unordered_map>
 
 #include <qbytearray.h>
@@ -74,10 +75,10 @@ private:
 	        props
 	);
 
-	[[nodiscard]] MprisPlayer::PlaybackSnapshot
+	[[nodiscard]] std::optional<MprisPlayer::PlaybackSnapshot>
 	buildPlaybackSnapshot(const winrt::Windows::Media::Control::GlobalSystemMediaTransportControlsSession& session
 	) const;
-	[[nodiscard]] MprisPlayer::TimelineSnapshot buildTimelineSnapshot(
+	[[nodiscard]] std::optional<MprisPlayer::TimelineSnapshot> buildTimelineSnapshot(
 	    const winrt::Windows::Media::Control::GlobalSystemMediaTransportControlsSession& session
 	) const;
 
