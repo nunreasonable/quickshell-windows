@@ -65,6 +65,12 @@ public:
 	void setMasterOrientation(const QString& orientation);
 	[[nodiscard]] double masterFactor() const { return this->mMasterFactor; }
 	void setMasterFactor(double factor);
+	[[nodiscard]] double scrollingColumnWidth() const { return this->mScrollingColumnWidth; }
+	void setScrollingColumnWidth(double width);
+	[[nodiscard]] QString scrollingCenter() const { return this->mScrollingCenter; }
+	void setScrollingCenter(const QString& center);
+
+	static void restoreForCrash();
 
 	void relayout();
 
@@ -81,6 +87,20 @@ public:
 	bool focusMaster(TrackedWindow* window);
 	bool resizeTiled(TrackedWindow* window, qint32 dx, qint32 dy);
 	bool setFloating(TrackedWindow* window, bool floating, bool toggle);
+
+	bool scrollColumns(TrackedWindow* window, qint32 delta);
+	bool scrollView(TrackedWindow* window, qint32 pixels);
+	bool columnWidth(TrackedWindow* window, double value, bool relative);
+	bool cycleColumnWidth(TrackedWindow* window, qint32 direction);
+	bool allColumnsWidth(TrackedWindow* window, double value);
+	bool fitColumns(TrackedWindow* window, tiling::FitMode mode);
+	bool focusColumn(TrackedWindow* window, Edge direction);
+	bool moveIntoColumn(TrackedWindow* window, Edge direction);
+	bool swapColumn(TrackedWindow* window, Edge direction);
+	bool promote(TrackedWindow* window);
+	bool centerColumn(TrackedWindow* window);
+	bool toggleFit(TrackedWindow* window);
+	bool toggleFullWidth(TrackedWindow* window);
 
 	bool beginEdgeDrag(TrackedWindow* window, bool left, bool top);
 	void edgeDrag(const QPoint& delta);
@@ -104,6 +124,8 @@ signals:
 	void masterNewOnTopChanged();
 	void masterOrientationChanged();
 	void masterFactorChanged();
+	void scrollingColumnWidthChanged();
+	void scrollingCenterChanged();
 	void windowTilingChanged(TrackedWindow* window);
 
 private:
@@ -152,6 +174,8 @@ private:
 		bool parked = false;
 		QRect preTiling;
 		quint64 focusStamp = 0;
+		bool offscreen = false;
+		QRect restore;
 	};
 
 	bool start();
@@ -186,6 +210,16 @@ private:
 	void armDeadline();
 	void restoreFloating(Managed& m);
 
+	[[nodiscard]] static tiling::ScrollingLayout* scrollingOf(const Layout* layout);
+	[[nodiscard]] tiling::ScrollingLayout* scrollingFor(TrackedWindow* window, Layout** layout);
+	void prepareScrolling(Layout* layout) const;
+	void settle(Layout* layout);
+	void refocus(Layout* layout);
+	void markOffscreen(Managed& m, bool offscreen, const QRect& restore);
+	void unpark(Managed& m);
+	void unparkAll();
+	static void rescueParked();
+
 	void onActiveWindowChanged();
 	void onRectChanged(TrackedWindow* window);
 	void onMoveSizeStarted(TrackedWindow* window);
@@ -219,6 +253,9 @@ private:
 	bool mMasterNewOnTop = false;
 	QString mMasterOrientation = QStringLiteral("left");
 	double mMasterFactor = 0.55;
+	double mScrollingColumnWidth = 0.5;
+	QString mScrollingCenter = QStringLiteral("overflow");
+	bool fitToggled = false;
 	QList<QRegularExpression> excludedPatterns;
 	QList<QRegularExpression> excludedTitles;
 
@@ -256,6 +293,8 @@ class Tiling: public QObject {
 	Q_PROPERTY(bool masterNewOnTop READ masterNewOnTop WRITE setMasterNewOnTop NOTIFY masterNewOnTopChanged);
 	Q_PROPERTY(QString masterOrientation READ masterOrientation WRITE setMasterOrientation NOTIFY masterOrientationChanged);
 	Q_PROPERTY(double masterFactor READ masterFactor WRITE setMasterFactor NOTIFY masterFactorChanged);
+	Q_PROPERTY(double scrollingColumnWidth READ scrollingColumnWidth WRITE setScrollingColumnWidth NOTIFY scrollingColumnWidthChanged);
+	Q_PROPERTY(QString scrollingCenter READ scrollingCenter WRITE setScrollingCenter NOTIFY scrollingCenterChanged);
 	// clang-format on
 
 public:
@@ -289,6 +328,10 @@ public:
 	void setMasterOrientation(const QString& orientation);
 	[[nodiscard]] double masterFactor() const;
 	void setMasterFactor(double factor);
+	[[nodiscard]] double scrollingColumnWidth() const;
+	void setScrollingColumnWidth(double width);
+	[[nodiscard]] QString scrollingCenter() const;
+	void setScrollingCenter(const QString& center);
 
 signals:
 	void enabledChanged();
@@ -304,6 +347,8 @@ signals:
 	void masterNewOnTopChanged();
 	void masterOrientationChanged();
 	void masterFactorChanged();
+	void scrollingColumnWidthChanged();
+	void scrollingCenterChanged();
 };
 
 } // namespace qs::windows

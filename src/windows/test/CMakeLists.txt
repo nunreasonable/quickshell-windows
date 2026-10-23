@@ -36,3 +36,11 @@ qt_add_executable(screenshot_jobs_test
 
 target_include_directories(screenshot_jobs_test PRIVATE ${QS_WINDOWS_SRC}/system)
 target_link_libraries(screenshot_jobs_test PRIVATE Qt6::Gui Qt6::Test)
+
+qt_add_executable(tiling_layout_test
+	tiling_layout_test.cpp
+	${QS_WINDOWS_SRC}/tiling_layout.cpp
+)
+
+target_include_directories(tiling_layout_test PRIVATE ${QS_WINDOWS_SRC})
+target_link_libraries(tiling_layout_test PRIVATE Qt6::Core Qt6::Test)

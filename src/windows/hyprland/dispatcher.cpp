@@ -50,6 +50,40 @@ std::optional<TilingManager::Edge> directionEdge(const QString& direction) {
 	return std::nullopt;
 }
 
+std::optional<double> parseFraction(QString text) {
+	text = text.trimmed();
+	auto percent = text.endsWith('%');
+	if (percent) text.chop(1);
+
+	auto value = 0.0;
+	auto slash = text.indexOf('/');
+
+	if (slash != -1) {
+		auto okTop = false;
+		auto okBottom = false;
+		auto top = text.left(slash).toDouble(&okTop);
+		auto bottom = text.mid(slash + 1).toDouble(&okBottom);
+		if (!okTop || !okBottom || bottom == 0.0) return std::nullopt;
+		value = top / bottom;
+	} else {
+		auto ok = false;
+		value = text.toDouble(&ok);
+		if (!ok) return std::nullopt;
+	}
+
+	return percent ? value / 100.0 : value;
+}
+
+std::optional<qs::windows::tiling::FitMode> fitMode(const QString& name) {
+	using qs::windows::tiling::FitMode;
+	if (name == "active") return FitMode::Active;
+	if (name == "visible") return FitMode::Visible;
+	if (name == "all") return FitMode::All;
+	if (name == "toend") return FitMode::ToEnd;
+	if (name == "tobeg" || name == "tobeginning") return FitMode::ToBeginning;
+	return std::nullopt;
+}
+
 bool isRelativeWorkspace(const QString& arg) {
 	auto a = arg.trimmed();
 	if (a.startsWith('e') || a.startsWith('r') || a.startsWith('m')) a = a.mid(1);
@@ -529,8 +563,15 @@ void Dispatcher::moveToWorkspace(TrackedWindow* window, const QString& arg, bool
 void Dispatcher::fullscreen(TrackedWindow* window, int mode) {
 	if (window == nullptr) return;
 
-	if (mode == 1) window->setMaximized(!window->maximized());
-	else window->setFullscreen(!window->fullscreen());
+	if (mode != 1) {
+		window->setFullscreen(!window->fullscreen());
+		return;
+	}
+
+	auto* tiling = TilingManager::active();
+	if (tiling != nullptr && tiling->toggleFullWidth(window)) return;
+
+	window->setMaximized(!window->maximized());
 }
 
 void Dispatcher::pin(TrackedWindow* window) {
@@ -679,6 +720,8 @@ void Dispatcher::layoutMessage(const QString& message) {
 	auto parts = message.split(' ', Qt::SkipEmptyParts);
 	if (parts.isEmpty()) return;
 	const auto& command = parts.first();
+	auto argument = parts.value(1).trimmed();
+	auto handled = true;
 
 	if (command == "togglesplit") {
 		tiling->toggleSplit(window);
@@ -691,14 +734,56 @@ void Dispatcher::layoutMessage(const QString& message) {
 		if (!ok) return;
 
 		if (command == "splitratio") tiling->splitRatio(window, value, exact);
-		else if (!tiling->masterRatio(window, value, exact)) this->unsupported("layoutmsg mfact (dwindle)");
+		else handled = tiling->masterRatio(window, value, exact);
 	} else if (command == "swapwithmaster") {
-		if (!tiling->swapWithMaster(window)) this->unsupported("layoutmsg swapwithmaster (dwindle)");
+		handled = tiling->swapWithMaster(window);
 	} else if (command == "focusmaster") {
-		if (!tiling->focusMaster(window)) this->unsupported("layoutmsg focusmaster (dwindle)");
+		handled = tiling->focusMaster(window);
+	} else if (command == "move" && !argument.isEmpty()) {
+		if (argument == "+col" || argument == "col") {
+			handled = tiling->scrollColumns(window, 1);
+		} else if (argument == "-col") {
+			handled = tiling->scrollColumns(window, -1);
+		} else {
+			auto ok = false;
+			auto pixels = argument.toDouble(&ok);
+			handled = ok && tiling->scrollView(window, qRound(pixels));
+		}
+	} else if (command == "colresize" && !argument.isEmpty()) {
+		if (argument == "+conf" || argument == "-conf") {
+			handled = tiling->cycleColumnWidth(window, argument.startsWith('+') ? 1 : -1);
+		} else if (argument == "all") {
+			auto value = parseFraction(parts.value(2));
+			handled = value && tiling->allColumnsWidth(window, *value);
+		} else {
+			auto relative = argument.startsWith('+') || argument.startsWith('-');
+			auto value = parseFraction(argument);
+			handled = value && tiling->columnWidth(window, *value, relative);
+		}
+	} else if (command == "fit" && !argument.isEmpty()) {
+		auto mode = fitMode(argument);
+		handled = mode && tiling->fitColumns(window, *mode);
+	} else if (command == "focus" && !argument.isEmpty()) {
+		auto edge = directionEdge(argument);
+		handled = edge && tiling->focusColumn(window, *edge);
+	} else if (command == "movewindowto" && !argument.isEmpty()) {
+		auto edge = directionEdge(argument);
+		handled = edge.has_value();
+		if (edge && !tiling->moveIntoColumn(window, *edge)) this->moveWindow(argument);
+	} else if (command == "swapcol" && !argument.isEmpty()) {
+		auto edge = directionEdge(argument);
+		handled = edge && tiling->swapColumn(window, *edge);
+	} else if (command == "promote") {
+		handled = tiling->promote(window);
+	} else if (command == "center" || command == "centercolumn") {
+		handled = tiling->centerColumn(window);
+	} else if (command == "togglefit") {
+		handled = tiling->toggleFit(window);
 	} else {
-		this->unsupported("layoutmsg " + command);
+		handled = false;
 	}
+
+	if (!handled) this->unsupported("layoutmsg " + command + " (" + tiling->layout() + ")");
 }
 
 void Dispatcher::resizeActive(const QString& args) {
@@ -745,7 +830,10 @@ void Dispatcher::centerWindow() {
 	if (window == nullptr) return;
 
 	auto* tiling = TilingManager::active();
-	if (tiling != nullptr && tiling->isTiled(window)) return;
+	if (tiling != nullptr && tiling->isTiled(window)) {
+		tiling->centerColumn(window);
+		return;
+	}
 
 	TilingManager::center(window);
 }

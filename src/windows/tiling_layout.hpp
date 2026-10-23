@@ -3,6 +3,7 @@
 #include <memory>
 #include <optional>
 
+#include <qhash.h>
 #include <qlist.h>
 #include <qpoint.h>
 #include <qrect.h>
@@ -17,7 +18,11 @@ enum class NewStatus : quint8 { Slave, Master, Inherit };
 
 enum class Orientation : quint8 { Left, Right, Top, Bottom, Center };
 
-enum class Kind : quint8 { Dwindle, Master };
+enum class Kind : quint8 { Dwindle, Master, Scrolling };
+
+enum class CenterMode : quint8 { Overflow, Always, Never };
+
+enum class FitMode : quint8 { Active, Visible, All, ToEnd, ToBeginning };
 
 struct Options {
 	bool preserveSplit = true;
@@ -28,6 +33,8 @@ struct Options {
 	bool newOnTop = false;
 	Orientation orientation = Orientation::Left;
 	double mfact = 0.55;
+	double columnWidth = 0.5;
+	CenterMode centerMode = CenterMode::Overflow;
 };
 
 class LayoutEngine {
@@ -67,6 +74,7 @@ public:
 	virtual void compute(const QRect& area) = 0;
 	[[nodiscard]] virtual QRect area() const = 0;
 	[[nodiscard]] virtual QRect box(Id id) const = 0;
+	[[nodiscard]] virtual bool isParked(Id /*id*/) const { return false; }
 
 	[[nodiscard]] static std::unique_ptr<LayoutEngine> create(Kind kind);
 };
@@ -212,6 +220,144 @@ private:
 	Orientation effective = Orientation::Left;
 	QList<QList<qsizetype>> columns;
 	QList<Edge> columnSides;
+};
+
+class ScrollingLayout: public LayoutEngine {
+public:
+	static constexpr double MIN_WIDTH = 0.1;
+	static constexpr double MAX_WIDTH = 1.0;
+	static constexpr int PARK_MARGIN = 256;
+
+	ScrollingLayout() = default;
+	~ScrollingLayout() override = default;
+	ScrollingLayout(const ScrollingLayout&) = delete;
+	ScrollingLayout& operator=(const ScrollingLayout&) = delete;
+	ScrollingLayout(ScrollingLayout&&) = delete;
+	ScrollingLayout& operator=(ScrollingLayout&&) = delete;
+
+	[[nodiscard]] Kind kind() const override { return Kind::Scrolling; }
+	[[nodiscard]] bool isEmpty() const override { return this->columns.isEmpty(); }
+	[[nodiscard]] bool contains(Id id) const override { return this->find(id).column != -1; }
+	[[nodiscard]] QList<Id> ids() const override;
+
+	void insert(Id id, Id target, const QPoint* cursor) override;
+	void remove(Id id) override;
+	void swap(Id a, Id b) override;
+	bool replace(Id id, Id with) override;
+
+	bool toggleSplit(Id /*id*/) override { return false; }
+	bool swapSplit(Id /*id*/) override { return false; }
+	bool splitRatio(Id id, double value, bool exact) override;
+
+	bool moveEdge(Id id, Edge edge, int position) override;
+	[[nodiscard]] bool hasEdge(Id id, Edge edge) const override;
+	bool resize(Id id, int dx, int dy) override;
+
+	void configure(const Options& options) override;
+
+	void setHidden(Id id, bool hidden) override;
+	[[nodiscard]] bool isHidden(Id id) const override { return this->hidden.contains(id); }
+
+	void compute(const QRect& area) override;
+	[[nodiscard]] QRect area() const override { return this->mArea; }
+	[[nodiscard]] QRect box(Id id) const override { return this->boxes.value(id); }
+	[[nodiscard]] bool isParked(Id id) const override { return this->parked.contains(id); }
+
+	void setGaps(int in, int out);
+	void setMonitors(const QRect& monitor, const QList<QRect>& others);
+
+	[[nodiscard]] QRect visibleBox(Id id) const { return this->visible.value(id); }
+	[[nodiscard]] Id active() const { return this->activeId; }
+	[[nodiscard]] qsizetype columnCount() const { return this->columns.length(); }
+	[[nodiscard]] qsizetype columnOf(Id id) const { return this->find(id).column; }
+	[[nodiscard]] QList<Id> column(qsizetype index) const;
+	[[nodiscard]] double columnWidth(qsizetype index) const;
+	[[nodiscard]] int view() const;
+	[[nodiscard]] CenterMode centerMode() const { return this->mCenterMode; }
+
+	bool activate(Id id);
+	[[nodiscard]] Id neighbor(Id id, Edge direction, bool wrap) const;
+	bool moveWindow(Id id, Edge direction);
+	bool moveInto(Id id, Edge direction);
+	bool swapColumn(Id id, Edge direction);
+	bool promote(Id id);
+	bool center(Id id);
+	bool scrollColumns(int delta);
+	bool scrollBy(int pixels);
+	bool fit(Id id, FitMode mode);
+	bool setColumnWidth(Id id, double value, bool relative);
+	bool setAllWidths(double value);
+	bool cycleWidth(Id id, int direction);
+	bool toggleFullWidth(Id id);
+
+	[[nodiscard]] static const QList<double>& presets();
+
+private:
+	struct Window {
+		Id id = 0;
+		double weight = 1.0;
+	};
+
+	struct Column {
+		QList<Window> windows;
+		double width = 0.5;
+		double restoreWidth = 0.0;
+		Id focused = 0;
+	};
+
+	struct Position {
+		qsizetype column = -1;
+		qsizetype row = -1;
+	};
+
+	struct Metrics {
+		int base = 1;
+		int view = 1;
+		int strip = 0;
+		QList<int> x;
+		QList<int> width;
+	};
+
+	[[nodiscard]] Position find(Id id) const;
+	[[nodiscard]] bool columnVisible(qsizetype index) const;
+	[[nodiscard]] qsizetype nextVisible(qsizetype from, int step, bool wrap) const;
+	[[nodiscard]] qsizetype nextRow(const Position& position, int step, bool wrap) const;
+	[[nodiscard]] Id focusedIn(qsizetype index) const;
+	[[nodiscard]] qsizetype activeColumn() const;
+	[[nodiscard]] Metrics metrics() const;
+	[[nodiscard]] int viewX(const Metrics& m) const;
+	void setViewX(const Metrics& m, int view);
+	[[nodiscard]] bool fullyVisible(const Metrics& m, qsizetype index, int view) const;
+	[[nodiscard]] static int fitView(const Metrics& m, qsizetype index, int view);
+	[[nodiscard]] static int centerView(const Metrics& m, qsizetype index);
+	[[nodiscard]] int clampView(const Metrics& m, int view) const;
+	[[nodiscard]] int targetView(const Metrics& m, qsizetype from, qsizetype to, int view) const;
+	[[nodiscard]] QList<QRect> frames(qsizetype index, int left, int width) const;
+	[[nodiscard]] QRect parkedFrame(const QRect& frame, bool left) const;
+	[[nodiscard]] bool nearestIsOwn(const QRect& rect) const;
+	[[nodiscard]] bool crossesOther(const QRect& rect) const;
+	[[nodiscard]] int screenLeft(const Metrics& m, qsizetype index, int view) const;
+	void setWidth(qsizetype index, double width);
+	void setWeights(qsizetype index, qsizetype upper, qsizetype lower, double share);
+	Window takeWindow(const Position& position);
+	void insertColumn(qsizetype index, const Window& window, double width);
+
+	QList<Column> columns;
+	QSet<Id> hidden;
+	QSet<Id> parked;
+	QHash<Id, QRect> boxes;
+	QHash<Id, QRect> visible;
+	QRect mArea;
+	QRect monitor;
+	QList<QRect> others;
+	int gapsIn = 0;
+	int gapsOut = 0;
+	double defaultWidth = 0.5;
+	CenterMode mCenterMode = CenterMode::Overflow;
+	Id activeId = 0;
+	Id openedChild = 0;
+	Id openedParent = 0;
+	int offset = 0;
 };
 
 } // namespace qs::windows::tiling

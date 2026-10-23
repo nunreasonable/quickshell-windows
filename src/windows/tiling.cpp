@@ -1,10 +1,14 @@
 #include "tiling.hpp"
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <cmath>
+#include <cstddef>
 #include <limits>
 #include <memory>
 #include <utility>
 
+#include <qcoreapplication.h>
 #include <qdatetime.h>
 #include <qfileinfo.h>
 #include <qguiapplication.h>
@@ -119,6 +123,106 @@ qint32 toPhysical(qint32 logical, qreal dpr) {
 	return static_cast<qint32>(std::lround(logical * dpr));
 }
 
+constexpr std::size_t PARK_SLOTS = 256;
+
+struct ParkSlot {
+	std::atomic<HWND> hwnd {nullptr};
+	std::atomic<quint64> rect {0};
+};
+
+std::array<ParkSlot, PARK_SLOTS> gParkSlots {}; // NOLINT
+std::atomic<ATOM> gParkAtom {0};               // NOLINT
+
+LPCWSTR atomName(ATOM atom) {
+	auto value = static_cast<ULONG_PTR>(atom);
+	return reinterpret_cast<LPCWSTR>(value); // NOLINT(performance-no-int-to-ptr)
+}
+
+ATOM parkAtom() {
+	auto atom = gParkAtom.load();
+	if (atom != 0) return atom;
+
+	atom = GlobalAddAtomW(L"QuickshellTilingParked");
+	gParkAtom.store(atom);
+	return atom;
+}
+
+quint64 packRect(const QRect& rect) {
+	auto x = static_cast<quint64>(static_cast<quint16>(qBound(-32768, rect.left(), 32767)));
+	auto y = static_cast<quint64>(static_cast<quint16>(qBound(-32768, rect.top(), 32767)));
+	auto width = static_cast<quint64>(qBound(1, rect.width(), 65535));
+	auto height = static_cast<quint64>(qBound(1, rect.height(), 65535));
+	return x | (y << 16) | (width << 32) | (height << 48);
+}
+
+QRect unpackRect(quint64 packed) {
+	auto x = static_cast<qint16>(packed & 0xFFFF);
+	auto y = static_cast<qint16>((packed >> 16) & 0xFFFF);
+	auto width = static_cast<int>((packed >> 32) & 0xFFFF);
+	auto height = static_cast<int>((packed >> 48) & 0xFFFF);
+	return {x, y, width, height};
+}
+
+void rememberParked(HWND hwnd, const QRect& restore) {
+	auto packed = packRect(restore);
+	ParkSlot* target = nullptr;
+
+	for (auto& slot: gParkSlots) {
+		auto* value = slot.hwnd.load();
+		if (value == hwnd) {
+			target = &slot;
+			break;
+		}
+		if (value == nullptr && target == nullptr) target = &slot;
+	}
+
+	if (target != nullptr) {
+		target->rect.store(packed);
+		target->hwnd.store(hwnd);
+	}
+
+	if (auto atom = parkAtom(); atom != 0) {
+		auto handle = static_cast<quintptr>(packed);
+		SetPropW(hwnd, atomName(atom), reinterpret_cast<HANDLE>(handle)); // NOLINT
+	}
+}
+
+void forgetParked(HWND hwnd) {
+	for (auto& slot: gParkSlots) {
+		if (slot.hwnd.load() == hwnd) slot.hwnd.store(nullptr);
+	}
+
+	if (auto atom = gParkAtom.load(); atom != 0) RemovePropW(hwnd, atomName(atom));
+}
+
+QRect clampInto(QRect rect, const QRect& work) {
+	if (!work.isValid()) return rect;
+	rect.setSize(rect.size().boundedTo(work.size()));
+	rect.moveLeft(qBound(work.left(), rect.left(), rightOf(work) - rect.width()));
+	rect.moveTop(qBound(work.top(), rect.top(), bottomOf(work) - rect.height()));
+	return rect;
+}
+
+QRect onScreen(const QRect& rect) {
+	auto native = toRECT(rect);
+	if (MonitorFromRect(&native, MONITOR_DEFAULTTONULL) != nullptr) return rect;
+	return clampInto(rect, monitorRects(MonitorFromRect(&native, MONITOR_DEFAULTTONEAREST)).work);
+}
+
+void restorePlacement(HWND hwnd, const QRect& rect) {
+	WINDOWPLACEMENT placement {};
+	placement.length = sizeof(placement);
+	if (!GetWindowPlacement(hwnd, &placement)) return;
+	placement.rcNormalPosition = toRECT(rect);
+	SetWindowPlacement(hwnd, &placement);
+}
+
+tiling::CenterMode centerModeOf(const QString& value) {
+	if (value == QStringLiteral("always")) return tiling::CenterMode::Always;
+	if (value == QStringLiteral("never")) return tiling::CenterMode::Never;
+	return tiling::CenterMode::Overflow;
+}
+
 } // namespace
 
 TilingManager* TilingManager::instance() {
@@ -144,6 +248,12 @@ TilingManager::TilingManager() {
 	this->deadlineTimer.setSingleShot(true);
 	this->deadlineTimer.setInterval(DEADLINE_MS);
 	QObject::connect(&this->deadlineTimer, &QTimer::timeout, this, &TilingManager::onDeadline);
+
+	if (auto* app = QCoreApplication::instance()) {
+		QObject::connect(app, &QCoreApplication::aboutToQuit, this, &TilingManager::unparkAll);
+	}
+
+	TilingManager::rescueParked();
 }
 
 void TilingManager::setEnabled(bool enabled) {
@@ -215,8 +325,11 @@ void TilingManager::setExcluded(const QStringList& excluded) {
 }
 
 void TilingManager::setLayout(const QString& layout) {
-	auto master = layout.trimmed().compare(QStringLiteral("master"), Qt::CaseInsensitive) == 0;
-	auto normalized = master ? QStringLiteral("master") : QStringLiteral("dwindle");
+	auto normalized = layout.trimmed().toLower();
+	if (normalized != QStringLiteral("master") && normalized != QStringLiteral("scrolling")) {
+		normalized = QStringLiteral("dwindle");
+	}
+
 	if (normalized == this->mLayout) return;
 	this->mLayout = normalized;
 	if (this->mEnabled) this->rebuildLayouts();
@@ -288,8 +401,30 @@ void TilingManager::setMasterFactor(double factor) {
 	emit this->masterFactorChanged();
 }
 
+void TilingManager::setScrollingColumnWidth(double width) {
+	width = qBound(tiling::ScrollingLayout::MIN_WIDTH, width, tiling::ScrollingLayout::MAX_WIDTH);
+	if (qFuzzyCompare(width, this->mScrollingColumnWidth)) return;
+	this->mScrollingColumnWidth = width;
+	this->markAll();
+	emit this->scrollingColumnWidthChanged();
+}
+
+void TilingManager::setScrollingCenter(const QString& center) {
+	auto value = center.trimmed().toLower();
+	if (value != QStringLiteral("always") && value != QStringLiteral("never")) {
+		value = QStringLiteral("overflow");
+	}
+
+	if (value == this->mScrollingCenter) return;
+	this->mScrollingCenter = value;
+	this->markAll();
+	emit this->scrollingCenterChanged();
+}
+
 tiling::Kind TilingManager::layoutKind() const {
-	return this->mLayout == QStringLiteral("master") ? tiling::Kind::Master : tiling::Kind::Dwindle;
+	if (this->mLayout == QStringLiteral("master")) return tiling::Kind::Master;
+	if (this->mLayout == QStringLiteral("scrolling")) return tiling::Kind::Scrolling;
+	return tiling::Kind::Dwindle;
 }
 
 tiling::Options TilingManager::options() const {
@@ -300,6 +435,14 @@ tiling::Options TilingManager::options() const {
 	options.defaultSplitRatio = this->mDefaultSplitRatio;
 	options.newOnTop = this->mMasterNewOnTop;
 	options.mfact = this->mMasterFactor;
+	options.columnWidth = this->mScrollingColumnWidth;
+	options.centerMode = centerModeOf(this->mScrollingCenter);
+
+	if (this->fitToggled) {
+		options.centerMode = options.centerMode == tiling::CenterMode::Always
+		                       ? tiling::CenterMode::Overflow
+		                       : tiling::CenterMode::Always;
+	}
 
 	if (this->mMasterNewStatus == QStringLiteral("master")) {
 		options.newStatus = tiling::NewStatus::Master;
@@ -342,6 +485,11 @@ void TilingManager::rebuildLayouts() {
 
 		fresh->configure(options);
 		layout->tree = std::move(fresh);
+
+		if (auto* scroll = TilingManager::scrollingOf(layout.get())) {
+			this->prepareScrolling(layout.get());
+			if (layout->lastFocused != nullptr) scroll->activate(idOf(layout->lastFocused));
+		}
 	}
 
 	this->edgeDragState = EdgeDrag();
@@ -517,8 +665,13 @@ void TilingManager::unmanage(TrackedWindow* window) {
 	auto iter = this->managed.find(window);
 	if (iter == this->managed.end()) return;
 
+	auto* from = iter->second.layout;
+	auto refocus = from != nullptr && from->lastFocused == window
+	            && TilingManager::scrollingOf(from) != nullptr;
+
 	QObject::disconnect(window, nullptr, this, nullptr);
 	this->takeOut(iter->second);
+	if (iter->second.offscreen) forgetParked(window->hwnd());
 	this->managed.erase(iter);
 
 	this->dirtyWindows.remove(window);
@@ -528,6 +681,8 @@ void TilingManager::unmanage(TrackedWindow* window) {
 	for (auto& [key, layout]: this->layouts) {
 		if (layout->lastFocused == window) layout->lastFocused = nullptr;
 	}
+
+	if (refocus) this->refocus(from);
 }
 
 TilingManager::State TilingManager::stateOf(const Managed& m) const {
@@ -621,6 +776,7 @@ TilingManager::Layout* TilingManager::layoutAt(const GUID& desktop, QScreen* scr
 	layout->screen = screen;
 	layout->tree = tiling::LayoutEngine::create(this->layoutKind());
 	layout->tree->configure(this->options());
+	this->prepareScrolling(layout.get());
 	auto rects = monitorRects(monitorForScreen(screen));
 	if (rects.valid) layout->tree->compute(rects.work);
 
@@ -664,6 +820,7 @@ void TilingManager::sync() {
 		for (auto id: layout->tree->ids()) {
 			if (auto* window = this->windowOf(id)) {
 				auto& m = this->managed.at(window);
+				this->unpark(m);
 				m.layout = nullptr;
 				m.target = QRect();
 				this->dirtyWindows.insert(window);
@@ -707,6 +864,7 @@ void TilingManager::syncWindow(TrackedWindow* window) {
 		auto floated = !window->minimized() && window->desktop() >= 0 && !m.elevated;
 		this->takeOut(m);
 		if (floated) this->restoreFloating(m);
+		else this->unpark(m);
 		return;
 	}
 
@@ -719,7 +877,9 @@ void TilingManager::syncWindow(TrackedWindow* window) {
 	if (current != nullptr && this->layoutAlive(current) && IsEqualGUID(current->desktop, desktop)) {
 		want = current;
 
-		if (state == State::Tiled && !m.verifying && window->screen() != current->screen) {
+		if (state == State::Tiled && !m.verifying && !m.offscreen
+		    && window->screen() != current->screen)
+		{
 			this->moveToLayout(m, this->layoutFor(window, true), nullptr);
 			return;
 		}
@@ -762,6 +922,12 @@ void TilingManager::insertInto(
 
 	layout->tree->configure(this->options());
 	layout->tree->insert(idOf(window), targetId, cursor);
+
+	if (auto* scroll = TilingManager::scrollingOf(layout)) {
+		this->prepareScrolling(layout);
+		if (this->tracker->activeWindow() == window) scroll->activate(idOf(window));
+	}
+
 	m.layout = layout;
 	m.parked = false;
 	m.target = QRect();
@@ -810,6 +976,8 @@ void TilingManager::apply(Layout* layout) {
 	if (!rects.valid) return;
 
 	layout->tree->configure(this->options());
+	this->prepareScrolling(layout);
+
 	for (auto id: layout->tree->ids()) {
 		auto* window = this->windowOf(id);
 		auto hidden = window != nullptr && this->stateOf(this->managed.at(window)) == State::Hidden;
@@ -818,12 +986,20 @@ void TilingManager::apply(Layout* layout) {
 
 	layout->tree->compute(rects.work);
 
+	auto* scroll = TilingManager::scrollingOf(layout);
+	auto in = toPhysical(this->mGapsIn, layout->screen->devicePixelRatio());
+
 	for (auto id: layout->tree->ids()) {
 		auto* window = this->windowOf(id);
 		if (window == nullptr || window == this->dragging) continue;
 
 		auto& m = this->managed.at(window);
 		if (this->stateOf(m) != State::Tiled) continue;
+
+		auto parked = scroll != nullptr && scroll->isParked(id);
+		auto restore = QRect();
+		if (parked) restore = clampInto(scroll->visibleBox(id).adjusted(in, in, -in, -in), rects.work);
+		this->markOffscreen(m, parked, restore);
 
 		this->place(m, this->tileRect(layout, window));
 	}
@@ -835,6 +1011,15 @@ QRect TilingManager::tileRect(const Layout* layout, TrackedWindow* window) const
 	auto dpr = layout->screen->devicePixelRatio();
 	auto in = toPhysical(this->mGapsIn, dpr);
 	auto out = toPhysical(this->mGapsOut, dpr);
+
+	if (layout->tree->kind() == tiling::Kind::Scrolling) {
+		return QRect(
+		    box.left() + in,
+		    box.top() + in,
+		    qMax(1, box.width() - 2 * in),
+		    qMax(1, box.height() - 2 * in)
+		);
+	}
 
 	auto left = box.left() == area.left() ? out : in;
 	auto top = box.top() == area.top() ? out : in;
@@ -920,38 +1105,228 @@ void TilingManager::restoreFloating(Managed& m) {
 	auto previous = m.preTiling;
 	m.preTiling = QRect();
 
+	auto parkedAt = m.offscreen ? m.restore : QRect();
+	if (m.offscreen) {
+		forgetParked(hwnd);
+		m.offscreen = false;
+		m.restore = QRect();
+	}
+
+	if (previous.isNull()) previous = parkedAt;
 	if (previous.isNull()) return;
 
 	if (IsIconic(hwnd) || IsZoomed(hwnd)) {
-		WINDOWPLACEMENT placement {};
-		placement.length = sizeof(placement);
-		if (GetWindowPlacement(hwnd, &placement)) {
-			placement.rcNormalPosition = toRECT(previous);
-			SetWindowPlacement(hwnd, &placement);
-		}
+		restorePlacement(hwnd, onScreen(previous));
 		return;
 	}
 
 	QRect raw;
 	QRect frame;
 	if (!readFrame(hwnd, raw, frame)) return;
+	if (!parkedAt.isNull()) raw = parkedAt;
 
 	auto rect = previous;
 	auto previousRect = toRECT(previous);
+	auto rawRect = toRECT(raw);
 	auto* then = MonitorFromRect(&previousRect, MONITOR_DEFAULTTONEAREST);
-	auto* now = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+	auto* now = MonitorFromRect(&rawRect, MONITOR_DEFAULTTONEAREST);
 
 	if (then != now) {
-		auto work = monitorRects(now).work;
 		rect.moveCenter(raw.center());
-		if (work.isValid()) {
-			rect.setSize(rect.size().boundedTo(work.size()));
-			rect.moveLeft(qBound(work.left(), rect.left(), rightOf(work) - rect.width()));
-			rect.moveTop(qBound(work.top(), rect.top(), bottomOf(work) - rect.height()));
-		}
+		rect = clampInto(rect, monitorRects(now).work);
 	}
 
-	setRawRect(hwnd, rect);
+	setRawRect(hwnd, onScreen(rect));
+}
+
+tiling::ScrollingLayout* TilingManager::scrollingOf(const Layout* layout) {
+	if (layout == nullptr || layout->tree == nullptr) return nullptr;
+	if (layout->tree->kind() != tiling::Kind::Scrolling) return nullptr;
+	return static_cast<tiling::ScrollingLayout*>(layout->tree.get());
+}
+
+void TilingManager::prepareScrolling(Layout* layout) const {
+	auto* scroll = TilingManager::scrollingOf(layout);
+	if (scroll == nullptr || layout->screen == nullptr) return;
+
+	auto dpr = layout->screen->devicePixelRatio();
+	scroll->setGaps(toPhysical(this->mGapsIn, dpr), toPhysical(this->mGapsOut, dpr));
+
+	QList<QRect> others;
+	for (auto* screen: QGuiApplication::screens()) {
+		if (screen == layout->screen) continue;
+		auto rect = physicalMonitor(screen);
+		if (rect.isValid()) others.append(rect);
+	}
+
+	scroll->setMonitors(physicalMonitor(layout->screen), others);
+}
+
+tiling::ScrollingLayout* TilingManager::scrollingFor(TrackedWindow* window, Layout** layout) {
+	auto iter = this->managed.find(window);
+	if (iter == this->managed.end() || iter->second.layout == nullptr) return nullptr;
+
+	auto& m = iter->second;
+	auto* scroll = TilingManager::scrollingOf(m.layout);
+	if (scroll == nullptr || this->stateOf(m) != State::Tiled) return nullptr;
+
+	*layout = m.layout;
+	this->prepareScrolling(m.layout);
+	if (scroll->active() != idOf(window)) scroll->activate(idOf(window));
+	return scroll;
+}
+
+void TilingManager::settle(Layout* layout) {
+	auto* scroll = TilingManager::scrollingOf(layout);
+	if (scroll == nullptr) return;
+
+	this->prepareScrolling(layout);
+	auto rects = monitorRects(monitorForScreen(layout->screen));
+	if (rects.valid) scroll->compute(rects.work);
+	this->markLayout(layout);
+
+	auto* window = this->windowOf(scroll->active());
+	if (window == nullptr || window == this->tracker->activeWindow()) return;
+	if (this->stateOf(this->managed.at(window)) == State::Out) return;
+
+	layout->lastFocused = window;
+	window->activate();
+}
+
+void TilingManager::refocus(Layout* layout) {
+	if (!this->layoutAlive(layout)) return;
+
+	auto current = this->desktops->currentIndex();
+	if (current < 0 || current >= this->desktops->count()) return;
+	if (!IsEqualGUID(this->desktops->desktops().at(current).id, layout->desktop)) return;
+
+	if (auto* active = this->tracker->activeWindow()) {
+		auto iter = this->managed.find(active);
+		if (iter == this->managed.end() || iter->second.layout != layout) return;
+	}
+
+	this->settle(layout);
+}
+
+void TilingManager::markOffscreen(Managed& m, bool offscreen, const QRect& restore) {
+	auto* hwnd = m.window->hwnd();
+
+	if (!offscreen) {
+		if (!m.offscreen) return;
+		m.offscreen = false;
+		m.restore = QRect();
+		forgetParked(hwnd);
+		return;
+	}
+
+	auto raw = restore;
+	QRect current;
+	QRect frame;
+	if (readFrame(hwnd, current, frame)) {
+		raw = restore.adjusted(
+		    current.left() - frame.left(),
+		    current.top() - frame.top(),
+		    rightOf(current) - rightOf(frame),
+		    bottomOf(current) - bottomOf(frame)
+		);
+	}
+
+	if (m.offscreen && raw == m.restore) return;
+	m.offscreen = true;
+	m.restore = raw;
+	rememberParked(hwnd, raw);
+}
+
+void TilingManager::unpark(Managed& m) {
+	if (!m.offscreen) return;
+
+	auto* hwnd = m.window->hwnd();
+	auto restore = m.restore;
+	m.offscreen = false;
+	m.restore = QRect();
+	m.target = QRect();
+	forgetParked(hwnd);
+
+	if (restore.isNull() || !IsWindow(hwnd)) return;
+
+	if (IsIconic(hwnd) || IsZoomed(hwnd)) restorePlacement(hwnd, onScreen(restore));
+	else setRawRect(hwnd, onScreen(restore));
+}
+
+void TilingManager::unparkAll() {
+	for (auto& [window, m]: this->managed) this->unpark(m);
+}
+
+void TilingManager::restoreForCrash() {
+	auto atom = gParkAtom.load();
+
+	for (auto& slot: gParkSlots) {
+		auto* hwnd = slot.hwnd.exchange(nullptr);
+		if (hwnd == nullptr || !IsWindow(hwnd) || IsIconic(hwnd)) continue;
+
+		auto rect = unpackRect(slot.rect.load());
+		SetWindowPos(
+		    hwnd,
+		    nullptr,
+		    rect.left(),
+		    rect.top(),
+		    rect.width(),
+		    rect.height(),
+		    SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS
+		);
+
+		if (atom != 0) RemovePropW(hwnd, atomName(atom));
+	}
+}
+
+void TilingManager::rescueParked() {
+	auto* owner = OpenMutexW(SYNCHRONIZE, FALSE, L"Local\\QuickshellTiling");
+	if (owner != nullptr) {
+		CloseHandle(owner);
+		return;
+	}
+
+	auto atom = GlobalFindAtomW(L"QuickshellTilingParked");
+	if (atom == 0) return;
+	gParkAtom.store(atom);
+
+	QList<HWND> windows;
+	EnumWindows(
+	    [](HWND hwnd, LPARAM param) -> BOOL {
+		    reinterpret_cast<QList<HWND>*>(param)->append(hwnd); // NOLINT(performance-no-int-to-ptr)
+		    return TRUE;
+	    },
+	    reinterpret_cast<LPARAM>(&windows)
+	);
+
+	auto rescued = 0;
+	for (auto* hwnd: windows) {
+		auto* value = GetPropW(hwnd, atomName(atom));
+		if (value == nullptr) continue;
+
+		RemovePropW(hwnd, atomName(atom));
+		auto rect = onScreen(unpackRect(static_cast<quint64>(reinterpret_cast<quintptr>(value))));
+
+		if (IsIconic(hwnd) || IsZoomed(hwnd)) {
+			WINDOWPLACEMENT placement {};
+			placement.length = sizeof(placement);
+			if (!GetWindowPlacement(hwnd, &placement)) continue;
+			if (MonitorFromRect(&placement.rcNormalPosition, MONITOR_DEFAULTTONULL) != nullptr) continue;
+			placement.rcNormalPosition = toRECT(rect);
+			SetWindowPlacement(hwnd, &placement);
+			rescued++;
+			continue;
+		}
+
+		if (MonitorFromWindow(hwnd, MONITOR_DEFAULTTONULL) != nullptr) continue;
+		setRawRect(hwnd, rect);
+		rescued++;
+	}
+
+	if (rescued > 0) {
+		qCInfo(logTiling) << "Brought back" << rescued
+		                  << "windows that a previous run left off screen.";
+	}
 }
 
 void TilingManager::onScreensChanged() {
@@ -975,7 +1350,14 @@ void TilingManager::onActiveWindowChanged() {
 
 	auto& m = iter->second;
 	m.focusStamp = ++this->focusCounter;
-	if (m.layout != nullptr) m.layout->lastFocused = window;
+	if (m.layout == nullptr) return;
+
+	m.layout->lastFocused = window;
+
+	if (auto* scroll = TilingManager::scrollingOf(m.layout)) {
+		this->prepareScrolling(m.layout);
+		if (scroll->activate(idOf(window))) this->markLayout(m.layout);
+	}
 }
 
 void TilingManager::onRectChanged(TrackedWindow* window) {
@@ -1009,6 +1391,11 @@ void TilingManager::verify() {
 
 void TilingManager::giveUp(Managed& m, const QRect& frame) {
 	m.verifying = false;
+
+	if (m.offscreen) {
+		m.accepted = frame;
+		return;
+	}
 
 	auto bigger = frame.width() > m.target.width() + EDGE_TOLERANCE
 	           || frame.height() > m.target.height() + EDGE_TOLERANCE;
@@ -1057,6 +1444,11 @@ void TilingManager::onDeadline() {
 			m.wasHung = false;
 			this->unverified.insert(window);
 			if (!this->verifyTimer.isActive()) this->verifyTimer.start();
+			continue;
+		}
+
+		if (m.offscreen) {
+			m.verifying = false;
 			continue;
 		}
 
@@ -1194,7 +1586,7 @@ TilingManager::Managed* TilingManager::neighbour(const Managed& from, Edge direc
 			if (window == nullptr || window == from.window) continue;
 
 			auto& m = this->managed.at(window);
-			if (this->stateOf(m) != State::Tiled) continue;
+			if (this->stateOf(m) != State::Tiled || layout->tree->isParked(id)) continue;
 
 			auto box = layout->tree->box(id);
 			auto distance = 0;
@@ -1308,12 +1700,28 @@ void TilingManager::moveToLayout(Managed& m, Layout* layout, TrackedWindow* targ
 	layout->lastFocused = m.window;
 	m.layout = layout;
 	m.target = QRect();
+
+	if (auto* scroll = TilingManager::scrollingOf(layout)) {
+		this->prepareScrolling(layout);
+		scroll->activate(idOf(m.window));
+	}
+
 	this->markLayout(layout);
 }
 
 bool TilingManager::focusDirection(Edge direction) {
 	auto* m = this->tiledActive();
 	if (m == nullptr) return false;
+
+	if (auto* scroll = TilingManager::scrollingOf(m->layout)) {
+		this->prepareScrolling(m->layout);
+		auto id = scroll->neighbor(idOf(m->window), direction, false);
+		if (id != 0 && this->windowOf(id) != nullptr) {
+			scroll->activate(id);
+			this->settle(m->layout);
+			return true;
+		}
+	}
 
 	auto* next = this->neighbour(*m, direction);
 	if (next == nullptr) return false;
@@ -1325,6 +1733,16 @@ bool TilingManager::focusDirection(Edge direction) {
 bool TilingManager::moveDirection(Edge direction) {
 	auto* m = this->tiledActive();
 	if (m == nullptr) return false;
+
+	if (auto* scroll = TilingManager::scrollingOf(m->layout)) {
+		this->prepareScrolling(m->layout);
+		if (scroll->moveWindow(idOf(m->window), direction)) {
+			this->settle(m->layout);
+		} else if (auto* screen = this->screenInDirection(m->layout->screen, direction)) {
+			this->moveToLayout(*m, this->layoutAt(m->layout->desktop, screen, true), nullptr);
+		}
+		return true;
+	}
 
 	auto* next = this->neighbour(*m, direction);
 
@@ -1343,7 +1761,147 @@ bool TilingManager::swapDirection(Edge direction) {
 	auto* m = this->tiledActive();
 	if (m == nullptr) return false;
 
+	if (auto* scroll = TilingManager::scrollingOf(m->layout)) {
+		this->prepareScrolling(m->layout);
+		auto* other = this->windowOf(scroll->neighbor(idOf(m->window), direction, false));
+		if (other != nullptr) {
+			this->swapWindows(*m, this->managed.at(other));
+			this->settle(m->layout);
+			return true;
+		}
+	}
+
 	if (auto* next = this->neighbour(*m, direction)) this->swapWindows(*m, *next);
+	return true;
+}
+
+bool TilingManager::scrollColumns(TrackedWindow* window, qint32 delta) {
+	Layout* layout = nullptr;
+	auto* scroll = this->scrollingFor(window, &layout);
+	if (scroll == nullptr) return false;
+
+	scroll->scrollColumns(delta);
+	this->settle(layout);
+	return true;
+}
+
+bool TilingManager::scrollView(TrackedWindow* window, qint32 pixels) {
+	Layout* layout = nullptr;
+	auto* scroll = this->scrollingFor(window, &layout);
+	if (scroll == nullptr) return false;
+
+	scroll->scrollBy(toPhysical(pixels, layout->screen->devicePixelRatio()));
+	this->settle(layout);
+	return true;
+}
+
+bool TilingManager::columnWidth(TrackedWindow* window, double value, bool relative) {
+	Layout* layout = nullptr;
+	auto* scroll = this->scrollingFor(window, &layout);
+	if (scroll == nullptr) return false;
+
+	scroll->setColumnWidth(idOf(window), value, relative);
+	this->settle(layout);
+	return true;
+}
+
+bool TilingManager::cycleColumnWidth(TrackedWindow* window, qint32 direction) {
+	Layout* layout = nullptr;
+	auto* scroll = this->scrollingFor(window, &layout);
+	if (scroll == nullptr) return false;
+
+	scroll->cycleWidth(idOf(window), direction);
+	this->settle(layout);
+	return true;
+}
+
+bool TilingManager::allColumnsWidth(TrackedWindow* window, double value) {
+	Layout* layout = nullptr;
+	auto* scroll = this->scrollingFor(window, &layout);
+	if (scroll == nullptr) return false;
+
+	scroll->setAllWidths(value);
+	this->settle(layout);
+	return true;
+}
+
+bool TilingManager::fitColumns(TrackedWindow* window, tiling::FitMode mode) {
+	Layout* layout = nullptr;
+	auto* scroll = this->scrollingFor(window, &layout);
+	if (scroll == nullptr) return false;
+
+	scroll->fit(idOf(window), mode);
+	this->settle(layout);
+	return true;
+}
+
+bool TilingManager::focusColumn(TrackedWindow* window, Edge direction) {
+	Layout* layout = nullptr;
+	auto* scroll = this->scrollingFor(window, &layout);
+	if (scroll == nullptr) return false;
+
+	auto id = scroll->neighbor(idOf(window), direction, true);
+	if (id != 0) scroll->activate(id);
+	this->settle(layout);
+	return true;
+}
+
+bool TilingManager::moveIntoColumn(TrackedWindow* window, Edge direction) {
+	Layout* layout = nullptr;
+	auto* scroll = this->scrollingFor(window, &layout);
+	if (scroll == nullptr) return false;
+
+	scroll->moveInto(idOf(window), direction);
+	this->settle(layout);
+	return true;
+}
+
+bool TilingManager::swapColumn(TrackedWindow* window, Edge direction) {
+	Layout* layout = nullptr;
+	auto* scroll = this->scrollingFor(window, &layout);
+	if (scroll == nullptr) return false;
+
+	scroll->swapColumn(idOf(window), direction);
+	this->settle(layout);
+	return true;
+}
+
+bool TilingManager::promote(TrackedWindow* window) {
+	Layout* layout = nullptr;
+	auto* scroll = this->scrollingFor(window, &layout);
+	if (scroll == nullptr) return false;
+
+	scroll->promote(idOf(window));
+	this->settle(layout);
+	return true;
+}
+
+bool TilingManager::centerColumn(TrackedWindow* window) {
+	Layout* layout = nullptr;
+	auto* scroll = this->scrollingFor(window, &layout);
+	if (scroll == nullptr) return false;
+
+	scroll->center(idOf(window));
+	this->settle(layout);
+	return true;
+}
+
+bool TilingManager::toggleFit(TrackedWindow* window) {
+	Layout* layout = nullptr;
+	if (this->scrollingFor(window, &layout) == nullptr) return false;
+
+	this->fitToggled = !this->fitToggled;
+	this->markAll();
+	return true;
+}
+
+bool TilingManager::toggleFullWidth(TrackedWindow* window) {
+	Layout* layout = nullptr;
+	auto* scroll = this->scrollingFor(window, &layout);
+	if (scroll == nullptr) return false;
+
+	scroll->toggleFullWidth(idOf(window));
+	this->settle(layout);
 	return true;
 }
 
@@ -1587,6 +2145,10 @@ Tiling::Tiling(QObject* parent): QObject(parent) {
 	QObject::connect(manager, &TilingManager::masterOrientationChanged, this, &Tiling::masterOrientationChanged);
 	// clang-format on
 	QObject::connect(manager, &TilingManager::masterFactorChanged, this, &Tiling::masterFactorChanged);
+	// clang-format off
+	QObject::connect(manager, &TilingManager::scrollingColumnWidthChanged, this, &Tiling::scrollingColumnWidthChanged);
+	QObject::connect(manager, &TilingManager::scrollingCenterChanged, this, &Tiling::scrollingCenterChanged);
+	// clang-format on
 }
 
 void Tiling::relayout() { TilingManager::instance()->relayout(); }
@@ -1628,5 +2190,15 @@ void Tiling::setMasterOrientation(const QString& orientation) {
 }
 double Tiling::masterFactor() const { return TilingManager::instance()->masterFactor(); }
 void Tiling::setMasterFactor(double factor) { TilingManager::instance()->setMasterFactor(factor); }
+double Tiling::scrollingColumnWidth() const {
+	return TilingManager::instance()->scrollingColumnWidth();
+}
+void Tiling::setScrollingColumnWidth(double width) {
+	TilingManager::instance()->setScrollingColumnWidth(width);
+}
+QString Tiling::scrollingCenter() const { return TilingManager::instance()->scrollingCenter(); }
+void Tiling::setScrollingCenter(const QString& center) {
+	TilingManager::instance()->setScrollingCenter(center);
+}
 
 } // namespace qs::windows
