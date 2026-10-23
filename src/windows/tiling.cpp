@@ -766,7 +766,8 @@ TilingManager::Layout* TilingManager::layoutFor(TrackedWindow* window, bool crea
 TilingManager::Layout* TilingManager::layoutAt(const GUID& desktop, QScreen* screen, bool create) {
 	if (screen == nullptr || !QGuiApplication::screens().contains(screen)) return nullptr;
 
-	auto key = VirtualDesktops::guidToString(desktop) + '|' + screen->name();
+	auto key = VirtualDesktops::guidToString(desktop) + '|' + screen->name() + '|'
+	         + QString::number(reinterpret_cast<quintptr>(screen), 16);
 	auto iter = this->layouts.find(key);
 	if (iter != this->layouts.end()) return iter->second.get();
 	if (!create) return nullptr;
@@ -925,7 +926,9 @@ void TilingManager::insertInto(
 
 	if (auto* scroll = TilingManager::scrollingOf(layout)) {
 		this->prepareScrolling(layout);
-		if (this->tracker->activeWindow() == window) scroll->activate(idOf(window));
+		auto focused = this->tracker->activeWindow() == window
+		            || GetForegroundWindow() == window->hwnd();
+		if (focused) scroll->activate(idOf(window));
 	}
 
 	m.layout = layout;
@@ -1186,11 +1189,42 @@ void TilingManager::settle(Layout* layout) {
 	this->markLayout(layout);
 
 	auto* window = this->windowOf(scroll->active());
-	if (window == nullptr || window == this->tracker->activeWindow()) return;
+	if (window == nullptr) return;
+
+	auto* foreground = this->tracker->windowFor(GetForegroundWindow());
+	if (window == foreground) return;
+	if (foreground == nullptr && window == this->tracker->activeWindow()) return;
 	if (this->stateOf(this->managed.at(window)) == State::Out) return;
 
 	layout->lastFocused = window;
 	window->activate();
+}
+
+bool TilingManager::focusIdleStrip() {
+	if (this->tracker == nullptr || this->desktops == nullptr) return false;
+	if (this->tracker->windowFor(GetForegroundWindow()) != nullptr) return false;
+
+	auto* active = this->tracker->activeWindow();
+	if (active != nullptr && this->managed.contains(active)) return false;
+
+	auto current = this->desktops->currentIndex();
+	if (current < 0 || current >= this->desktops->count()) return false;
+
+	auto point = POINT {};
+	GetCursorPos(&point);
+	auto* screen = this->tracker->screenFor(MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST));
+	if (screen == nullptr) screen = focusedScreen();
+
+	auto* layout = this->layoutAt(this->desktops->desktops().at(current).id, screen, false);
+	auto* scroll = TilingManager::scrollingOf(layout);
+	if (scroll == nullptr) return false;
+
+	auto* window = this->windowOf(scroll->active());
+	if (window == nullptr || this->stateOf(this->managed.at(window)) != State::Tiled) return false;
+
+	qCDebug(logTiling) << "No window has the focus; focusing the strip's column" << window->addressHex();
+	this->settle(layout);
+	return true;
 }
 
 void TilingManager::refocus(Layout* layout) {
@@ -1558,10 +1592,30 @@ void TilingManager::drop(Managed& m, const QPoint& cursor) {
 	this->markLayout(from);
 }
 
+TrackedWindow* TilingManager::focusedWindow() const {
+	if (this->tracker == nullptr) return nullptr;
+
+	auto* active = this->tracker->activeWindow();
+	auto* hwnd = GetForegroundWindow();
+	auto* foreground = this->tracker->windowFor(hwnd);
+	if (foreground == nullptr || foreground == active) return active;
+
+	DWORD cloaked = 0;
+	DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked));
+	if (cloaked != 0) return active;
+
+	qCInfo(logTiling) << "The foreground window" << foreground->addressHex() << foreground->appId()
+	                  << "is not the tracked active window"
+	                  << (active == nullptr ? QStringLiteral("(none)") : active->addressHex())
+	                  << "; tiling commands use the foreground one.";
+	this->tracker->refreshForeground();
+	return foreground;
+}
+
 TilingManager::Managed* TilingManager::tiledActive() {
 	if (this->tracker == nullptr) return nullptr;
 
-	auto iter = this->managed.find(this->tracker->activeWindow());
+	auto iter = this->managed.find(this->focusedWindow());
 	if (iter == this->managed.end()) return nullptr;
 
 	auto& m = iter->second;
@@ -1711,7 +1765,7 @@ void TilingManager::moveToLayout(Managed& m, Layout* layout, TrackedWindow* targ
 
 bool TilingManager::focusDirection(Edge direction) {
 	auto* m = this->tiledActive();
-	if (m == nullptr) return false;
+	if (m == nullptr) return this->focusIdleStrip();
 
 	if (auto* scroll = TilingManager::scrollingOf(m->layout)) {
 		this->prepareScrolling(m->layout);

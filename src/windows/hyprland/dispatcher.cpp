@@ -569,7 +569,10 @@ void Dispatcher::fullscreen(TrackedWindow* window, int mode) {
 	}
 
 	auto* tiling = TilingManager::active();
-	if (tiling != nullptr && tiling->toggleFullWidth(window)) return;
+	if (tiling != nullptr) {
+		auto* focused = window == this->ipc->tracker()->activeWindow() ? tiling->focusedWindow() : window;
+		if (focused != nullptr && tiling->toggleFullWidth(focused)) return;
+	}
 
 	window->setMaximized(!window->maximized());
 }
@@ -714,7 +717,7 @@ void Dispatcher::layoutMessage(const QString& message) {
 		return;
 	}
 
-	auto* window = this->ipc->tracker()->activeWindow();
+	auto* window = tiling->focusedWindow();
 	if (window == nullptr) return;
 
 	auto parts = message.split(' ', Qt::SkipEmptyParts);
@@ -826,10 +829,10 @@ void Dispatcher::resizeActive(const QString& args) {
 }
 
 void Dispatcher::centerWindow() {
-	auto* window = this->ipc->tracker()->activeWindow();
+	auto* tiling = TilingManager::active();
+	auto* window = tiling != nullptr ? tiling->focusedWindow() : this->ipc->tracker()->activeWindow();
 	if (window == nullptr) return;
 
-	auto* tiling = TilingManager::active();
 	if (tiling != nullptr && tiling->isTiled(window)) {
 		tiling->centerColumn(window);
 		return;

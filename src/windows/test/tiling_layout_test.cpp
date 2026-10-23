@@ -88,6 +88,7 @@ private slots:
 	void removingAHiddenWindowKeepsTheView();
 	void neighboursWrapOnRequest();
 	void swapKeepsTheView();
+	void adoptedWindowsHaveNeighbours();
 };
 
 void TestTilingLayout::newColumnsGoRightOfTheFocusedOne() {
@@ -645,6 +646,37 @@ void TestTilingLayout::swapKeepsTheView() {
 	QVERIFY(layout.replace(B, D));
 	QCOMPARE(layout.active(), D);
 	QCOMPARE(layout.ids(), (QList<Id> {D, A, C}));
+}
+
+void TestTilingLayout::adoptedWindowsHaveNeighbours() {
+	ScrollingLayout layout;
+	setup(layout, {QRect(1000, 0, 1000, 800)});
+
+	layout.insert(A, 0, nullptr);
+	layout.insert(B, 0, nullptr);
+	layout.insert(C, 0, nullptr);
+	layout.activate(C);
+	layout.insert(D, 0, nullptr);
+	layout.compute(AREA);
+
+	QCOMPARE(layout.ids(), (QList<Id> {A, C, D, B}));
+	QCOMPARE(layout.active(), C);
+	QCOMPARE(layout.box(A), QRect(0, 0, 500, 800));
+	QCOMPARE(layout.box(C), QRect(500, 0, 500, 800));
+
+	QCOMPARE(layout.neighbor(C, Edge::Left, false), A);
+	QCOMPARE(layout.neighbor(C, Edge::Right, false), D);
+	QCOMPARE(layout.neighbor(A, Edge::Right, false), C);
+	QCOMPARE(layout.neighbor(B, Edge::Left, false), D);
+	QCOMPARE(layout.neighbor(A, Edge::Left, false), Id(0));
+
+	QVERIFY(layout.activate(A));
+	layout.compute(AREA);
+	QCOMPARE(layout.view(), 0);
+	QVERIFY(layout.activate(D));
+	layout.compute(AREA);
+	QCOMPARE(layout.box(D), QRect(500, 0, 500, 800));
+	QVERIFY(layout.isParked(A));
 }
 
 QTEST_APPLESS_MAIN(TestTilingLayout)

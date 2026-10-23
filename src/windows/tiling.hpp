@@ -75,6 +75,7 @@ public:
 	void relayout();
 
 	[[nodiscard]] bool isTiled(TrackedWindow* window) const;
+	[[nodiscard]] TrackedWindow* focusedWindow() const;
 
 	bool focusDirection(Edge direction);
 	bool moveDirection(Edge direction);
@@ -215,6 +216,7 @@ private:
 	void prepareScrolling(Layout* layout) const;
 	void settle(Layout* layout);
 	void refocus(Layout* layout);
+	bool focusIdleStrip();
 	void markOffscreen(Managed& m, bool offscreen, const QRect& restore);
 	void unpark(Managed& m);
 	void unparkAll();
