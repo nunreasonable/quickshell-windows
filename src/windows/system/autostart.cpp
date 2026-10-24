@@ -22,6 +22,8 @@
 #include <taskschd.h>
 #include <wrl/client.h>
 
+#include "../../core/instanceinfo.hpp"
+#include "autostart_config.hpp"
 #include "registry_util.hpp"
 #include "shell_link.hpp"
 
@@ -38,11 +40,16 @@ const wchar_t* const APPROVED_RUN_KEY =
     L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run";
 const wchar_t* const APPROVED_FOLDER_KEY =
     L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\StartupFolder";
-const auto SELF_RUN_VALUE = QStringLiteral("illogical-impulse");
-const auto TASK_PREFIX = QStringLiteral("illogical-impulse");
-const auto TASK_DESCRIPTION =
-    QStringLiteral("Starts illogical-impulse (ii-windows) when you sign in.");
-const auto SHELL_ARGS = QStringLiteral("-n -c ii");
+const auto SELF_RUN_VALUE = QStringLiteral(QS_AUTOSTART_NAME);
+const auto TASK_PREFIX = QStringLiteral(QS_AUTOSTART_NAME);
+const auto TASK_DESCRIPTION = QStringLiteral(QS_AUTOSTART_DESCRIPTION);
+
+QString shellArgs() {
+	auto args = QStringLiteral(QS_AUTOSTART_ARGS);
+	if (!args.isEmpty()) return args;
+	return QStringLiteral("-n -p \"") + QDir::toNativeSeparators(InstanceInfo::CURRENT.configPath)
+	     + QStringLiteral("\"");
+}
 
 struct ComApartment {
 	explicit ComApartment(DWORD coinit): hr(CoInitializeEx(nullptr, coinit)) {}
@@ -166,7 +173,7 @@ QString taskXml(const QString& user, const QString& exe, const QString& workDir)
 	x += QStringLiteral("<Actions Context=\"Author\"><Exec><Command>");
 	x += xmlEscape(taskCommand(exe));
 	x += QStringLiteral("</Command><Arguments>");
-	x += xmlEscape(SHELL_ARGS);
+	x += xmlEscape(shellArgs());
 	x += QStringLiteral("</Arguments><WorkingDirectory>");
 	x += xmlEscape(workDir);
 	x += QStringLiteral("</WorkingDirectory></Exec></Actions></Task>");
@@ -234,7 +241,7 @@ QString selfExe() {
 QString selfWorkDir() { return QDir::toNativeSeparators(QCoreApplication::applicationDirPath()); }
 
 QString runCommand() {
-	return QStringLiteral("\"") + selfExe() + QStringLiteral("\" ") + SHELL_ARGS;
+	return QStringLiteral("\"") + selfExe() + QStringLiteral("\" ") + shellArgs();
 }
 
 HRESULT openTaskRoot(ComPtr<ITaskFolder>& root) {

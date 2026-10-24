@@ -95,9 +95,15 @@ qt_add_resources(quickshell-windows "windows-panel-effects"
 	FILES shaders/panel_effect.frag.qsb
 )
 
+set(QS_AUTOSTART_NAME "illogical-impulse" CACHE STRING "Run key value and scheduled task prefix Autostart uses to start the shell itself")
+set(QS_AUTOSTART_DESCRIPTION "Starts illogical-impulse (ii-windows) when you sign in." CACHE STRING "Description of the scheduled task that starts the shell itself")
+set(QS_AUTOSTART_ARGS "-n -c ii" CACHE STRING "Arguments the shell's own startup entry passes to qsw.exe (empty: the config that turned it on)")
+configure_file(system/autostart_config.hpp.in "${CMAKE_CURRENT_BINARY_DIR}/autostart_config.hpp" @ONLY)
+
 target_include_directories(quickshell-windows PRIVATE
 	${CMAKE_CURRENT_SOURCE_DIR}/system
 	${CMAKE_CURRENT_SOURCE_DIR}/image
+	${CMAKE_CURRENT_BINARY_DIR}
 )
 
 add_subdirectory(wayland)
