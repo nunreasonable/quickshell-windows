@@ -52,6 +52,14 @@ earlier ones, and `ignoreAlpha` limits the blur to `Rectangle` fills more opaque
 read the pixels, so text and images don't get blur of their own). Blur is off while Windows' transparency effects
 are off, or high contrast or energy saver are on. `QS_WINDOWS_BLUR=0` turns it off for a run.
 
+### Panel animations
+
+A rule can also animate a panel when it appears and hides, like Hyprland's `layerrule = animation`:
+`"animation": "slide"` (from the nearest edge), `"slide top"`/`"bottom"`/`"left"`/`"right"`, `"popin 80%"`, `"fade"`
+or `"noAnim"`. Panels without one just appear. `BackdropBlur.panelAnimations` turns every animation off, and
+`BackdropBlur.panelAnimationStyle: "expressive"` swaps the standard curves for springs, a content cascade and shader
+effects that are only loaded while in use.
+
 ## Global shortcuts
 
 Windows has no compositor to bind keys for you, so Quickshell does it, with `RegisterHotKey` and a low-level
@@ -120,8 +128,11 @@ A user keybinds file can also list only its changes, so later changes to the def
   `swapnext`, `cyclenext`, `killactive`, `closewindow`, `fullscreen`, `fullscreenstate`, `togglefloating`,
   `setfloating`, `settiled`, `pin`, `centerwindow`, `resizeactive`, `movewindowpixel`, `togglesplit`, `pseudo`,
   `layoutmsg`, `togglegroup`, `togglespecialworkspace`, `submap`, `exec` and `global`.
-- **Tiling** like Hyprland's dwindle layout is there but optional, per desktop and monitor (`Quickshell.Windows`
-  `Tiling`), and so is moving and resizing windows with Super + drag (`SuperDrag`).
+- **Tiling** like Hyprland's dwindle, master and scrolling layouts is there but optional, per desktop and monitor
+  (`Quickshell.Windows` `Tiling`), and so is moving and resizing windows with Super + drag (`SuperDrag`). The
+  scrolling layout keeps windows in columns on a strip that scrolls sideways (`layoutmsg` takes Hyprland's
+  `colresize`, `fit`, `movewindowto` and friends). Windows can't clip other apps' windows, so columns out of view
+  are moved just off screen, and they only peek in on screen edges with no other monitor next to them.
 
 For the active window, prefer `ToplevelManager.activeToplevel` from `Quickshell.Wayland`.
 
@@ -141,8 +152,10 @@ For the active window, prefer `ToplevelManager.activeToplevel` from `Quickshell.
 `Quickshell.Windows` adds Windows-only singletons: `Network` (Wi-Fi included), `Brightness` (DDC/CI and WMI),
 `Clipboard` (history), `Screenshot` and `Ocr`, `ScreenRecorder`, `Wallpaper`, `Displays`, `Session`
 (lock, sign out, restart...), `Taskbar`, `Autostart`, `Credentials`, `Keyboard`, `Input`, `IdlePower`,
-`SystemStats`, `SystemMonitor`, `WindowManager`, `Tiling`, `SuperDrag` and a few more. They're what ii-windows
-uses where Linux would call a command-line tool.
+`SystemStats`, `SystemMonitor`, `WindowManager`, `Tiling`, `SuperDrag`, `CalendarEvents` (iCalendar feeds),
+`AppActions` (run as administrator, open the file location or uninstall page) and a few more. They're what ii-windows
+uses where Linux would call a command-line tool. `Autostart` can also make the shell start when you sign in, as a
+scheduled task or a Run key entry, with the config that turned it on.
 
 ## Notes for contributors
 
