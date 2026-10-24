@@ -10,6 +10,10 @@ if [ ! -f "$QSW_BUILD/build.ninja" ]; then
 		-DCMAKE_TOOLCHAIN_FILE="$QSW/windows/cmake/clang-cl-xwin.cmake" \
 		-DCLI11_INCLUDE_DIR="$QSW_TOOLCHAIN/cli11/include" \
 		-DDISTRIBUTOR="quickshell-windows" \
+		-DQS_VERSION_FILE="$QSW/windows/VERSION" \
+		-DQS_AUTOSTART_NAME="Quickshell" \
+		-DQS_AUTOSTART_DESCRIPTION="Starts Quickshell when you sign in." \
+		-DQS_AUTOSTART_ARGS="" \
 		"$@"
 fi
 cmake --build "$QSW_BUILD"
