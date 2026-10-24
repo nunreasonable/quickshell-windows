@@ -29,7 +29,7 @@ it and run:
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -Zip .\quickshell-<version>-windows-x64.zip
 ```
 
-Other options: `-Version v0.3.1-win1` for a specific release, `-Destination <folder>`, `-NoPath`. To remove it:
+Other options: `-Version v0.3.2-win1` for a specific release, `-Destination <folder>`, `-NoPath`. To remove it:
 
 ```powershell
 & "$env:LOCALAPPDATA\Programs\Quickshell\install.ps1" -Uninstall
