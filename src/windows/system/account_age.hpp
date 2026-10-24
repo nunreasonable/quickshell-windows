@@ -17,6 +17,7 @@ class AccountAge: public QObject {
 	Q_PROPERTY(QString ageGroup READ ageGroup NOTIFY changed);
 	Q_PROPERTY(bool spicyAllowed READ spicyAllowed NOTIFY changed);
 	Q_PROPERTY(QString spicyRestriction READ spicyRestriction NOTIFY changed);
+	Q_PROPERTY(bool canConfirmAge READ canConfirmAge NOTIFY changed);
 	// clang-format on
 
 public:
@@ -27,6 +28,7 @@ public:
 	[[nodiscard]] QString ageGroup() const { return this->mAge; }
 	[[nodiscard]] bool spicyAllowed() const;
 	[[nodiscard]] QString spicyRestriction() const;
+	[[nodiscard]] bool canConfirmAge() const;
 
 	Q_INVOKABLE void refresh();
 

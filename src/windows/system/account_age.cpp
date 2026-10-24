@@ -107,13 +107,20 @@ QString lookUpAge(const QString& principal) {
 			switch (user.CheckUserAgeConsentGroupAsync(UserAgeConsentGroup::Adult).get()) {
 			case UserAgeConsentResult::Included: result = QStringLiteral("adult"); break;
 			case UserAgeConsentResult::NotIncluded: result = QStringLiteral("notAdult"); break;
+			case UserAgeConsentResult::NotEnforced: result = QStringLiteral("notEnforced"); break;
+			case UserAgeConsentResult::Ambiguous: result = QStringLiteral("ambiguous"); break;
 			default: result = QStringLiteral("unknown"); break;
 			}
+		} else {
+			result = QStringLiteral("unidentified");
 		}
 	} catch (const winrt::hresult_error& e) {
+		result = e.code() == winrt::hresult(static_cast<int32_t>(0x80070005)) ? QStringLiteral("denied")
+		                                                                       : QStringLiteral("error");
 		qCWarning(logAccountAge) << "Couldn't check the account's age group:"
 		                         << QString::fromWCharArray(e.message().c_str());
 	} catch (...) {
+		result = QStringLiteral("error");
 		qCWarning(logAccountAge) << "Couldn't check the account's age group";
 	}
 
@@ -166,7 +173,11 @@ void AccountAge::apply(const QString& kind, const QString& age) {
 	this->mReady = true;
 	this->mKind = kind;
 	this->mAge = age;
-	qCInfo(logAccountAge) << "Account kind" << kind << "age group" << age;
+	if (kind == QStringLiteral("microsoft") && age != QStringLiteral("adult")) {
+		qCWarning(logAccountAge) << "Windows didn't confirm this Microsoft account's age, age group" << age;
+	} else {
+		qCInfo(logAccountAge) << "Account kind" << kind << "age group" << age;
+	}
 	emit this->changed();
 }
 
@@ -185,13 +196,18 @@ QString AccountAge::spicyRestriction() const {
 	if (this->mAge == QStringLiteral("notAdult")) {
 		return QStringLiteral("Spicy Stuff needs a Microsoft account aged 18 or older. Windows says this account is not an adult account.");
 	}
-	if (this->mAge == QStringLiteral("unsupported")) {
-		return QStringLiteral("Spicy Stuff needs a Microsoft account aged 18 or older. This version of Windows can't confirm an account's age; Windows 11 can.");
+	if (this->mAge == QStringLiteral("ambiguous")) {
+		return QStringLiteral("Spicy Stuff needs a Microsoft account aged 18 or older. Windows can't say this is an adult account.");
 	}
-	if (this->mAge != QStringLiteral("adult")) {
-		return QStringLiteral("Spicy Stuff needs a Microsoft account aged 18 or older. Windows couldn't confirm this account's age.");
+	if (this->canConfirmAge()) {
+		return QStringLiteral("Windows doesn't tell apps like ii how old this Microsoft account is. Confirm in ii's settings that you're 18 or older to use Spicy Stuff.");
 	}
 	return QString();
+}
+
+bool AccountAge::canConfirmAge() const {
+	return this->mReady && this->mKind == QStringLiteral("microsoft") && this->mAge != QStringLiteral("adult")
+	    && this->mAge != QStringLiteral("notAdult") && this->mAge != QStringLiteral("ambiguous");
 }
 
 } // namespace qs::windows::sys
