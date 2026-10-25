@@ -243,8 +243,12 @@ void WorkspaceBehavior::repairFocus() {
 	    reinterpret_cast<LPARAM>(&search)
 	);
 
-	if (search.found == nullptr) search.found = GetShellWindow();
-	if (search.found == nullptr || search.found == foreground) return;
+	if (search.found == nullptr) {
+		this->tracker->refreshForeground();
+		qCDebug(logWorkspace) << "Nothing to focus on this desktop after a desktop change";
+		return;
+	}
+	if (search.found == foreground) return;
 
 	auto ok = forceForegroundWindow(search.found);
 	this->tracker->refreshForeground();
