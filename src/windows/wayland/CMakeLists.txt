@@ -3,6 +3,7 @@ qt_add_library(quickshell-windows-wayland STATIC
 	idle_inhibitor.cpp
 	toplevel.cpp
 	screencopy_view.cpp
+	window_thumbnail.cpp
 )
 
 qt_add_qml_module(quickshell-windows-wayland
@@ -18,7 +19,7 @@ qs_add_module_deps_light(quickshell-windows-wayland Quickshell Quickshell.Window
 
 install_qml_module(quickshell-windows-wayland)
 
-target_link_libraries(quickshell-windows-wayland PRIVATE Qt::Quick quickshell-core quickshell-windows powrprof d3d11)
+target_link_libraries(quickshell-windows-wayland PRIVATE Qt::Quick quickshell-core quickshell-windows powrprof d3d11 dwmapi)
 
 qs_module_pch(quickshell-windows-wayland SET large)
 
