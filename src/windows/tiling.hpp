@@ -96,6 +96,7 @@ public:
 	bool allColumnsWidth(TrackedWindow* window, double value);
 	bool fitColumns(TrackedWindow* window, tiling::FitMode mode);
 	bool focusColumn(TrackedWindow* window, Edge direction);
+	bool focusColumnAt(POINT point, qint32 steps);
 	bool moveIntoColumn(TrackedWindow* window, Edge direction);
 	bool swapColumn(TrackedWindow* window, Edge direction);
 	bool promote(TrackedWindow* window);
@@ -217,6 +218,7 @@ private:
 	void settle(Layout* layout);
 	void refocus(Layout* layout);
 	bool focusIdleStrip();
+	void syncWheel() const;
 	void markOffscreen(Managed& m, bool offscreen, const QRect& restore);
 	void unpark(Managed& m);
 	void unparkAll();

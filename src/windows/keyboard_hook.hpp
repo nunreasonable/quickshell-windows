@@ -61,6 +61,7 @@ public:
 	static bool sendKey(uint8_t vk);
 	static bool sendChord(uint8_t mods, uint8_t vk, int times = 1);
 	static void noteSuperChord();
+	static void maskSuper();
 
 	static constexpr ULONG_PTR INJECTION_MARKER = 0x5153484B;
 	static constexpr uint8_t MASK_KEY = 0xE8;

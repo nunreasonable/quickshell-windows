@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
 #include <limits>
 #include <memory>
 #include <utility>
@@ -26,6 +27,7 @@
 #include <qtimer.h>
 #include <qtypes.h>
 
+#include "super_drag.hpp"
 #include "util.hpp"
 #include "virtual_desktops.hpp"
 #include "window_tracker.hpp"
@@ -269,6 +271,7 @@ void TilingManager::setEnabled(bool enabled) {
 		this->stop();
 	}
 
+	this->syncWheel();
 	emit this->enabledChanged();
 }
 
@@ -333,7 +336,14 @@ void TilingManager::setLayout(const QString& layout) {
 	if (normalized == this->mLayout) return;
 	this->mLayout = normalized;
 	if (this->mEnabled) this->rebuildLayouts();
+	this->syncWheel();
 	emit this->layoutChanged();
+}
+
+void TilingManager::syncWheel() const {
+	SuperDragManager::instance()->setWheelColumns(
+	    this->mEnabled && this->mLayout == QStringLiteral("scrolling")
+	);
 }
 
 void TilingManager::setSmartSplit(bool smart) {
@@ -1896,6 +1906,34 @@ bool TilingManager::focusColumn(TrackedWindow* window, Edge direction) {
 
 	auto id = scroll->neighbor(idOf(window), direction, true);
 	if (id != 0) scroll->activate(id);
+	this->settle(layout);
+	return true;
+}
+
+bool TilingManager::focusColumnAt(POINT point, qint32 steps) {
+	auto current = this->desktops->currentIndex();
+	if (steps == 0 || current < 0 || current >= this->desktops->count()) return false;
+
+	auto* screen = this->tracker->screenFor(MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST));
+	if (screen == nullptr) return false;
+
+	auto* layout = this->layoutAt(this->desktops->desktops().at(current).id, screen, false);
+	auto* scroll = TilingManager::scrollingOf(layout);
+	if (scroll == nullptr) return false;
+
+	this->prepareScrolling(layout);
+	auto id = scroll->active();
+	auto direction = steps > 0 ? Edge::Right : Edge::Left;
+
+	for (auto step = 0; id != 0 && step < std::abs(steps); step++) {
+		auto next = scroll->neighbor(id, direction, false);
+		if (next == 0) break;
+		id = next;
+	}
+
+	if (id == 0 || id == scroll->active()) return false;
+
+	scroll->activate(id);
 	this->settle(layout);
 	return true;
 }

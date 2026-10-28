@@ -426,6 +426,10 @@ void KeyboardHook::setSnapshot(std::shared_ptr<const HookSnapshot> snapshot) {
 
 void KeyboardHook::noteSuperChord() { gSuperChord.store(true); }
 
+void KeyboardHook::maskSuper() {
+	if (!gSuperChord.exchange(true)) injectMask();
+}
+
 bool KeyboardHook::sendKey(uint8_t vk) {
 	auto scan = static_cast<WORD>(MapVirtualKeyW(vk, MAPVK_VK_TO_VSC));
 	auto extended = isExtendedKey(vk);

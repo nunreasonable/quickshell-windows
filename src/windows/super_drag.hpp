@@ -22,6 +22,7 @@ public:
 
 	[[nodiscard]] bool enabled() const { return this->mEnabled; }
 	void setEnabled(bool enabled);
+	void setWheelColumns(bool enabled);
 
 	static bool onMouseHook(WPARAM message, const MSLLHOOKSTRUCT* info);
 	static void onHookStopped();
@@ -44,6 +45,7 @@ private:
 	LRESULT onStarted(HWND hwnd, LPARAM flags);
 	void onTiledResize();
 	void onEnded(HWND hwnd, LPARAM delta);
+	static bool onWheel(WPARAM message, const MSLLHOOKSTRUCT* info);
 	void finishGuiDrag(const POINT* delta);
 
 	static LRESULT CALLBACK messageWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -53,6 +55,7 @@ private:
 	std::thread worker;
 	bool workerRunning = false;
 	bool mEnabled = false;
+	bool wheelColumns = false;
 	GuiDrag guiDrag;
 };
 

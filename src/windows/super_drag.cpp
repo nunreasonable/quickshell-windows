@@ -39,6 +39,7 @@ constexpr UINT WM_SD_END = WM_APP + 4;
 constexpr UINT WM_SD_STARTED = WM_APP + 1;
 constexpr UINT WM_SD_TILED_RESIZE = WM_APP + 2;
 constexpr UINT WM_SD_ENDED = WM_APP + 3;
+constexpr UINT WM_SD_WHEEL = WM_APP + 4;
 
 constexpr LPARAM FLAG_RESIZE = 1;
 constexpr LPARAM FLAG_LEFT = 2;
@@ -54,6 +55,7 @@ constexpr DWORD SETTLE_TIMEOUT_MS = 150;
 constexpr DWORD SETTLE_STEP_MS = 5;
 constexpr LONG CLAMP_SLACK = 32;
 constexpr DWORD ELEVATION_CACHE_MS = 2000;
+constexpr DWORD WHEEL_RESET_MS = 400;
 
 constexpr UINT POS_FLAGS = SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS;
 
@@ -67,6 +69,7 @@ std::atomic<uint64_t> gCursor = 0;       // NOLINT
 std::atomic<bool> gMovePending = false;  // NOLINT
 std::atomic<uint64_t> gTiledDelta = 0;   // NOLINT
 std::atomic<bool> gTiledPending = false; // NOLINT
+std::atomic<bool> gWheelColumns = false; // NOLINT
 
 struct HookState {
 	bool active = false;
@@ -74,6 +77,8 @@ struct HookState {
 	DWORD elevationPid = 0;
 	DWORD elevationTime = 0;
 	bool elevated = false;
+	qint32 wheel = 0;
+	DWORD wheelTime = 0;
 };
 
 HookState gHook; // NOLINT
@@ -581,6 +586,16 @@ void SuperDragManager::setEnabled(bool enabled) {
 	emit this->enabledChanged();
 }
 
+void SuperDragManager::setWheelColumns(bool enabled) {
+	if (enabled == this->wheelColumns) return;
+	this->wheelColumns = enabled;
+	gWheelColumns.store(enabled);
+
+	auto* tracker = InputMaskTracker::instance();
+	if (enabled) tracker->acquireHook();
+	else tracker->releaseHook();
+}
+
 bool SuperDragManager::startWorker() {
 	if (this->workerRunning) return true;
 
@@ -668,6 +683,10 @@ bool SuperDragManager::onMouseHook(WPARAM message, const MSLLHOOKSTRUCT* info) {
 		return message == (hook.resize ? WM_RBUTTONDOWN : WM_LBUTTONDOWN);
 	}
 
+	if (message == WM_MOUSEWHEEL || message == WM_MOUSEHWHEEL) {
+		return SuperDragManager::onWheel(message, info);
+	}
+
 	auto resize = message == WM_RBUTTONDOWN;
 	if (message != WM_LBUTTONDOWN && !resize) return false;
 	if (!gEnabled.load(std::memory_order_relaxed) || !superAlone()) return false;
@@ -688,6 +707,42 @@ bool SuperDragManager::onMouseHook(WPARAM message, const MSLLHOOKSTRUCT* info) {
 	return true;
 }
 
+bool SuperDragManager::onWheel(WPARAM message, const MSLLHOOKSTRUCT* info) {
+	if (!gWheelColumns.load(std::memory_order_relaxed)) return false;
+	if (!isDown(VK_LWIN) && !isDown(VK_RWIN)) return false;
+	if (isDown(VK_CONTROL) || isDown(VK_MENU)) return false;
+
+	auto horizontal = message == WM_MOUSEHWHEEL;
+	if (horizontal == isDown(VK_SHIFT)) return false;
+
+	auto delta = static_cast<qint32>(static_cast<SHORT>(HIWORD(info->mouseData)));
+	auto step = horizontal ? delta : -delta;
+	auto& hook = gHook;
+
+	if (info->time - hook.wheelTime > WHEEL_RESET_MS || (hook.wheel > 0) != (step > 0)) {
+		hook.wheel = 0;
+	}
+
+	hook.wheelTime = info->time;
+	hook.wheel += step;
+	auto columns = hook.wheel / WHEEL_DELTA;
+
+	if (columns != 0) {
+		hook.wheel -= columns * WHEEL_DELTA;
+		if (auto* gui = gGuiWindow.load()) {
+			PostMessageW(
+			    gui,
+			    WM_SD_WHEEL,
+			    static_cast<WPARAM>(static_cast<INT_PTR>(columns)),
+			    static_cast<LPARAM>(pack(info->pt))
+			);
+		}
+	}
+
+	hotkeys::KeyboardHook::maskSuper();
+	return true;
+}
+
 void SuperDragManager::onHookStopped() {
 	if (!gHook.active) return;
 	gHook.active = false;
@@ -702,6 +757,14 @@ SuperDragManager::messageWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 	case WM_SD_STARTED: return SuperDragManager::instance()->onStarted(target, lParam);
 	case WM_SD_TILED_RESIZE: SuperDragManager::instance()->onTiledResize(); return 0;
 	case WM_SD_ENDED: SuperDragManager::instance()->onEnded(target, lParam); return 0;
+	case WM_SD_WHEEL:
+		if (auto* tiling = TilingManager::active()) {
+			tiling->focusColumnAt(
+			    unpack(static_cast<uint64_t>(lParam)),
+			    static_cast<qint32>(static_cast<INT_PTR>(wParam))
+			);
+		}
+		return 0;
 	default: return DefWindowProcW(hwnd, msg, wParam, lParam);
 	}
 }
