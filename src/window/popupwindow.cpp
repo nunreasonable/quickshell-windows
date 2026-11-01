@@ -61,6 +61,9 @@ void ProxyPopupWindow::completeWindow() {
 
 	this->window->setTransientParent(bw);
 	this->window->setFlag(this->bWantsGrab ? Qt::Popup : Qt::ToolTip);
+#ifdef Q_OS_WIN
+	this->window->setFlag(Qt::FramelessWindowHint);
+#endif
 
 	this->mAnchor.markDirty();
 	PopupPositioner::instance()->reposition(&this->mAnchor, this->window);
