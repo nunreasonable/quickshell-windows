@@ -67,6 +67,8 @@ public:
 	void setMasterFactor(double factor);
 	[[nodiscard]] double scrollingColumnWidth() const { return this->mScrollingColumnWidth; }
 	void setScrollingColumnWidth(double width);
+	[[nodiscard]] QList<double> scrollingPresets() const { return this->mScrollingPresets; }
+	void setScrollingPresets(const QList<double>& presets);
 	[[nodiscard]] QString scrollingCenter() const { return this->mScrollingCenter; }
 	void setScrollingCenter(const QString& center);
 
@@ -127,6 +129,7 @@ signals:
 	void masterOrientationChanged();
 	void masterFactorChanged();
 	void scrollingColumnWidthChanged();
+	void scrollingPresetsChanged();
 	void scrollingCenterChanged();
 	void windowTilingChanged(TrackedWindow* window);
 
@@ -258,6 +261,7 @@ private:
 	QString mMasterOrientation = QStringLiteral("left");
 	double mMasterFactor = 0.55;
 	double mScrollingColumnWidth = 0.5;
+	QList<double> mScrollingPresets;
 	QString mScrollingCenter = QStringLiteral("overflow");
 	bool fitToggled = false;
 	QList<QRegularExpression> excludedPatterns;
@@ -298,6 +302,7 @@ class Tiling: public QObject {
 	Q_PROPERTY(QString masterOrientation READ masterOrientation WRITE setMasterOrientation NOTIFY masterOrientationChanged);
 	Q_PROPERTY(double masterFactor READ masterFactor WRITE setMasterFactor NOTIFY masterFactorChanged);
 	Q_PROPERTY(double scrollingColumnWidth READ scrollingColumnWidth WRITE setScrollingColumnWidth NOTIFY scrollingColumnWidthChanged);
+	Q_PROPERTY(QList<double> scrollingPresets READ scrollingPresets WRITE setScrollingPresets NOTIFY scrollingPresetsChanged);
 	Q_PROPERTY(QString scrollingCenter READ scrollingCenter WRITE setScrollingCenter NOTIFY scrollingCenterChanged);
 	// clang-format on
 
@@ -334,6 +339,8 @@ public:
 	void setMasterFactor(double factor);
 	[[nodiscard]] double scrollingColumnWidth() const;
 	void setScrollingColumnWidth(double width);
+	[[nodiscard]] QList<double> scrollingPresets() const;
+	void setScrollingPresets(const QList<double>& presets);
 	[[nodiscard]] QString scrollingCenter() const;
 	void setScrollingCenter(const QString& center);
 
@@ -352,6 +359,7 @@ signals:
 	void masterOrientationChanged();
 	void masterFactorChanged();
 	void scrollingColumnWidthChanged();
+	void scrollingPresetsChanged();
 	void scrollingCenterChanged();
 };
 

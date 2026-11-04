@@ -1,4 +1,5 @@
 #include "tiling_layout.hpp"
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <memory>
@@ -1157,6 +1158,13 @@ void ScrollingLayout::setHidden(Id id, bool hidden) {
 void ScrollingLayout::configure(const Options& options) {
 	this->defaultWidth = clampWidth(options.columnWidth);
 	this->mCenterMode = options.centerMode;
+
+	QList<double> widths;
+	for (auto width: options.widthPresets) widths.append(clampWidth(width));
+	std::sort(widths.begin(), widths.end());
+	auto close = [](double a, double b) { return b - a < 0.005; };
+	widths.erase(std::unique(widths.begin(), widths.end(), close), widths.end());
+	this->widthPresets = widths.isEmpty() ? ScrollingLayout::presets() : widths;
 }
 
 void ScrollingLayout::setGaps(int in, int out) {
@@ -1558,7 +1566,7 @@ bool ScrollingLayout::cycleWidth(Id id, int direction) {
 	auto at = this->find(id);
 	if (at.column == -1) return false;
 
-	const auto& list = ScrollingLayout::presets();
+	const auto& list = this->widthPresets;
 	auto current = this->columns[at.column].width;
 	auto next = direction > 0 ? list.first() : list.last();
 

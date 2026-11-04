@@ -419,6 +419,13 @@ void TilingManager::setScrollingColumnWidth(double width) {
 	emit this->scrollingColumnWidthChanged();
 }
 
+void TilingManager::setScrollingPresets(const QList<double>& presets) {
+	if (presets == this->mScrollingPresets) return;
+	this->mScrollingPresets = presets;
+	this->markAll();
+	emit this->scrollingPresetsChanged();
+}
+
 void TilingManager::setScrollingCenter(const QString& center) {
 	auto value = center.trimmed().toLower();
 	if (value != QStringLiteral("always") && value != QStringLiteral("never")) {
@@ -446,6 +453,7 @@ tiling::Options TilingManager::options() const {
 	options.newOnTop = this->mMasterNewOnTop;
 	options.mfact = this->mMasterFactor;
 	options.columnWidth = this->mScrollingColumnWidth;
+	options.widthPresets = this->mScrollingPresets;
 	options.centerMode = centerModeOf(this->mScrollingCenter);
 
 	if (this->fitToggled) {
@@ -2239,6 +2247,7 @@ Tiling::Tiling(QObject* parent): QObject(parent) {
 	QObject::connect(manager, &TilingManager::masterFactorChanged, this, &Tiling::masterFactorChanged);
 	// clang-format off
 	QObject::connect(manager, &TilingManager::scrollingColumnWidthChanged, this, &Tiling::scrollingColumnWidthChanged);
+	QObject::connect(manager, &TilingManager::scrollingPresetsChanged, this, &Tiling::scrollingPresetsChanged);
 	QObject::connect(manager, &TilingManager::scrollingCenterChanged, this, &Tiling::scrollingCenterChanged);
 	// clang-format on
 }
@@ -2287,6 +2296,12 @@ double Tiling::scrollingColumnWidth() const {
 }
 void Tiling::setScrollingColumnWidth(double width) {
 	TilingManager::instance()->setScrollingColumnWidth(width);
+}
+QList<double> Tiling::scrollingPresets() const {
+	return TilingManager::instance()->scrollingPresets();
+}
+void Tiling::setScrollingPresets(const QList<double>& presets) {
+	TilingManager::instance()->setScrollingPresets(presets);
 }
 QString Tiling::scrollingCenter() const { return TilingManager::instance()->scrollingCenter(); }
 void Tiling::setScrollingCenter(const QString& center) {

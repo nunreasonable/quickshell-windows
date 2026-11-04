@@ -80,6 +80,7 @@ private slots:
 	void movingIntoAColumnStacks();
 	void promoteAndSwapColumns();
 	void widthPresetsCycle();
+	void customWidthPresets();
 	void fullWidthToggles();
 	void fitModes();
 	void scrollingByColumnsAndPixels();
@@ -439,6 +440,31 @@ void TestTilingLayout::widthPresetsCycle() {
 	QCOMPARE(layout.columnWidth(0), ScrollingLayout::MAX_WIDTH);
 	layout.setColumnWidth(A, 0.0, false);
 	QCOMPARE(layout.columnWidth(0), ScrollingLayout::MIN_WIDTH);
+}
+
+void TestTilingLayout::customWidthPresets() {
+	ScrollingLayout layout;
+	auto options = Options();
+	options.widthPresets = {0.75, 0.25, 0.5, 0.252, 3.0};
+	layout.configure(options);
+	layout.setGaps(0, 0);
+	layout.setMonitors(AREA, {});
+	layout.compute(AREA);
+	fill(layout, {A});
+
+	layout.cycleWidth(A, 1);
+	QCOMPARE(layout.columnWidth(0), 0.75);
+	layout.cycleWidth(A, 1);
+	QCOMPARE(layout.columnWidth(0), 1.0);
+	layout.cycleWidth(A, 1);
+	QCOMPARE(layout.columnWidth(0), 0.25);
+	layout.cycleWidth(A, -1);
+	QCOMPARE(layout.columnWidth(0), 1.0);
+
+	options.widthPresets = {};
+	layout.configure(options);
+	layout.cycleWidth(A, 1);
+	QCOMPARE(layout.columnWidth(0), 1.0 / 3.0);
 }
 
 void TestTilingLayout::fullWidthToggles() {

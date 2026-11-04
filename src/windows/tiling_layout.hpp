@@ -34,6 +34,7 @@ struct Options {
 	Orientation orientation = Orientation::Left;
 	double mfact = 0.55;
 	double columnWidth = 0.5;
+	QList<double> widthPresets;
 	CenterMode centerMode = CenterMode::Overflow;
 };
 
@@ -353,6 +354,7 @@ private:
 	int gapsIn = 0;
 	int gapsOut = 0;
 	double defaultWidth = 0.5;
+	QList<double> widthPresets = ScrollingLayout::presets();
 	CenterMode mCenterMode = CenterMode::Overflow;
 	Id activeId = 0;
 	Id openedChild = 0;
