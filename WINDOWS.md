@@ -112,6 +112,26 @@ A user keybinds file can also list only its changes, so later changes to the def
 `exec:<command>`, `ipc:<target>:<function>`, `key:<key>`), with `@<keys>` added when several defaults share it.
 `keys` moves it, `disabled` gives its keys back to Windows, and binds without `base` are added.
 
+## Why the modules have Linux names
+
+The QML modules keep the names Quickshell uses on Linux (`Quickshell.Hyprland`, `Quickshell.Wayland`,
+`Services.Pipewire`, `Services.Mpris`, `Services.UPower` and the others) on purpose: they're the same APIs, so a config
+and Quickshell's own documentation work on both systems without changes. On Windows they mean:
+
+| In QML | On Windows |
+|---|---|
+| `Hyprland` workspaces | virtual desktops |
+| `Hyprland` monitors, `Quickshell.screens` | displays |
+| `ToplevelManager` (`Quickshell.Wayland`) | the top-level app windows, the ones the taskbar shows |
+| `PanelWindow`, `WlrLayershell` | topmost panels; with an exclusive zone, app bars that reserve screen space |
+| `ScreencopyView`, `WindowThumbnail` | Windows.Graphics.Capture, and the window manager's own thumbnails |
+| `Services.Pipewire` | Core Audio |
+| `Services.Mpris` | the media controls in Windows' media flyout |
+| `Services.UPower` | the battery and power plans |
+| `Services.Notifications` | the shell's own notifications, plus a mirror of Windows' toasts |
+
+What exists only on Windows is in `Quickshell.Windows`, under Windows names (see the end of [Services](#services)).
+
 ## Hyprland compatibility
 
 `Quickshell.Hyprland` keeps its API, backed by Windows:
@@ -133,6 +153,8 @@ A user keybinds file can also list only its changes, so later changes to the def
   scrolling layout keeps windows in columns on a strip that scrolls sideways (`layoutmsg` takes Hyprland's
   `colresize`, `fit`, `movewindowto` and friends). Windows can't clip other apps' windows, so columns out of view
   are moved just off screen, and they only peek in on screen edges with no other monitor next to them.
+  `Tiling.scrollingPresets` sets the widths that `colresize +conf` and `-conf` step through, and Super with the
+  sideways wheel (or Shift+Super with the normal one) moves to the next column on the monitor under the cursor.
 
 For the active window, prefer `ToplevelManager.activeToplevel` from `Quickshell.Wayland`.
 
@@ -153,7 +175,8 @@ For the active window, prefer `ToplevelManager.activeToplevel` from `Quickshell.
 `Clipboard` (history), `Screenshot` and `Ocr`, `ScreenRecorder`, `Wallpaper`, `Displays`, `Session`
 (lock, sign out, restart...), `Taskbar`, `Autostart`, `Credentials`, `Keyboard`, `Input`, `IdlePower`,
 `SystemStats`, `SystemMonitor`, `WindowManager`, `Tiling`, `SuperDrag`, `CalendarEvents` (iCalendar feeds),
-`AppActions` (run as administrator, open the file location or uninstall page) and a few more. They're what ii-windows
+`AppActions` (run as administrator, open the file location or uninstall page), `WindowFrame` (hides a window's
+native title bar so a QML window can draw its own) and a few more. They're what ii-windows
 uses where Linux would call a command-line tool. `Autostart` can also make the shell start when you sign in, as a
 scheduled task or a Run key entry, with the config that turned it on.
 

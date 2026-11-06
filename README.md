@@ -71,10 +71,12 @@ Most of Quickshell's API is backed by Windows itself, so configs written for Lin
 | `Quickshell.Services.UPower` | battery and power plans |
 | `Quickshell.Bluetooth` | adapters, devices, pairing |
 | `ScreencopyView` | live window and screen previews through Windows.Graphics.Capture |
+| `WindowThumbnail` | window previews drawn by the window manager, which also show minimized windows |
 | `Quickshell.Windows` | Windows-only extras: network, brightness, clipboard history, screenshots and OCR, screen recording, wallpaper, and more |
 
 `Quickshell.Services.Pam`, `Polkit` and Wayland's session lock are inert stand-ins: Windows has its own lock
-screen and UAC. [WINDOWS.md](WINDOWS.md) has the full list and how the port works.
+screen and UAC. The modules keep their Linux names so the same config runs on both systems; [WINDOWS.md](WINDOWS.md)
+has what each one means on Windows, the full list and how the port works.
 
 ## What's here
 
