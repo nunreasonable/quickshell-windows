@@ -22,7 +22,11 @@ Q_LOGGING_CATEGORY(logScreenshotJobs, "quickshell.windows.screenshot", QtWarning
 constexpr int REMOVE_RETRY_MS = 1000;
 constexpr int REMOVE_ATTEMPTS = 30;
 
-QString destinationKey(const QString& path) { return QFileInfo(path).absoluteFilePath(); }
+QString destinationPath(const QString& path) { return QFileInfo(path).absoluteFilePath(); }
+
+QString destinationKey(const QString& path) {
+	return QDir::cleanPath(destinationPath(path)).toCaseFolded();
+}
 
 bool removeIfPresent(const QString& path) {
 	return !QFileInfo::exists(path) || QFile::remove(path);
@@ -42,13 +46,14 @@ ScreenshotJobs::ScreenshotJobs() {
 }
 
 ScreenshotJobs::Job ScreenshotJobs::start(const QString& path) {
-	auto key = destinationKey(path);
-	this->supersede(key);
+	auto absolutePath = destinationPath(path);
+	auto key = destinationKey(absolutePath);
+	this->supersede(absolutePath);
 
 	auto job = Job {
 	    .id = this->nextId++,
-	    .path = key,
-	    .partPath = key + u".tmp-" + QUuid::createUuid().toString(QUuid::Id128),
+	    .path = absolutePath,
+	    .partPath = absolutePath + u".tmp-" + QUuid::createUuid().toString(QUuid::Id128),
 	    .cancelled = std::make_shared<std::atomic_bool>(false),
 	};
 
@@ -70,11 +75,12 @@ void ScreenshotJobs::supersede(const QString& path) {
 }
 
 void ScreenshotJobs::discard(const QString& path) {
-	auto key = destinationKey(path);
-	this->supersede(key);
-	if (removeIfPresent(key)) return;
+	auto absolutePath = destinationPath(path);
+	auto key = destinationKey(absolutePath);
+	this->supersede(absolutePath);
+	if (removeIfPresent(absolutePath)) return;
 
-	this->removals.insert(key, REMOVE_ATTEMPTS);
+	this->removals.insert(key, Removal {.path = absolutePath, .attempts = REMOVE_ATTEMPTS});
 	if (!this->removalRetry.isActive()) this->removalRetry.start();
 }
 
@@ -82,8 +88,9 @@ QString ScreenshotJobs::finish(int id, bool written) {
 	auto job = this->jobs.take(id);
 	if (job.id != id) return {};
 
-	auto current = this->destinations.value(job.path) == id;
-	if (current) this->destinations.remove(job.path);
+	auto key = destinationKey(job.path);
+	auto current = this->destinations.value(key) == id;
+	if (current) this->destinations.remove(key);
 
 	if (!written || !current || job.isCancelled()) {
 		QFile::remove(job.partPath);
@@ -119,10 +126,10 @@ bool ScreenshotJobs::write(const Job& job, const QImage& image, int quality) {
 
 void ScreenshotJobs::retryRemovals() {
 	for (auto it = this->removals.begin(); it != this->removals.end();) {
-		if (removeIfPresent(it.key())) {
+		if (removeIfPresent(it.value().path)) {
 			it = this->removals.erase(it);
-		} else if (--it.value() <= 0) {
-			qCWarning(logScreenshotJobs) << "Cannot remove" << it.key();
+		} else if (--it.value().attempts <= 0) {
+			qCWarning(logScreenshotJobs) << "Cannot remove" << it.value().path;
 			it = this->removals.erase(it);
 		} else {
 			++it;

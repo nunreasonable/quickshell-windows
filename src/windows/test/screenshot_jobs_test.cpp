@@ -60,6 +60,7 @@ class TestScreenshotJobs: public QObject {
 
 private slots:
 	void staleWriterReleasedLast();
+	void caseInsensitiveDestination();
 	void cancelledWriterReleasedLast();
 	void cancelledBeforeStart();
 	void cancelledAfterWrite();
@@ -72,13 +73,14 @@ private slots:
 	void unknownRequest();
 
 private:
-	void releasedLast(bool cancelOld);
+	void releasedLast(bool cancelOld, bool caseVariant = false);
 };
 
-void TestScreenshotJobs::releasedLast(bool cancelOld) {
+void TestScreenshotJobs::releasedLast(bool cancelOld, bool caseVariant) {
 	QTemporaryDir dir;
 	QVERIFY(dir.isValid());
 	auto path = dir.filePath("image-DISPLAY1");
+	auto newPath = caseVariant ? path.toCaseFolded() : path;
 
 	ScreenshotJobs jobs;
 	QHash<int, QString> published;
@@ -105,9 +107,14 @@ void TestScreenshotJobs::releasedLast(bool cancelOld) {
 
 	oldWritten.acquire();
 	QVERIFY(QFileInfo::exists(oldJob.partPath));
+#ifndef Q_OS_WIN
+	if (caseVariant && !QFileInfo::exists(oldJob.partPath.toCaseFolded())) {
+		QSKIP("Filesystem is case-sensitive");
+	}
+#endif
 	if (cancelOld) jobs.cancel(oldJob.id);
 
-	auto newJob = jobs.start(path);
+	auto newJob = jobs.start(newPath);
 	QVERIFY(newJob.partPath != oldJob.partPath);
 	QThreadPool::globalInstance()->start([&, newJob]() {
 		auto ok = ScreenshotJobs::write(newJob, filled(Qt::blue), QUALITY);
@@ -119,18 +126,20 @@ void TestScreenshotJobs::releasedLast(bool cancelOld) {
 	});
 
 	QTRY_VERIFY(published.contains(newJob.id));
-	QCOMPARE(published.value(newJob.id), QFileInfo(path).absoluteFilePath());
-	QCOMPARE(colorAt(path), QColor(Qt::blue));
+	QCOMPARE(published.value(newJob.id), QFileInfo(newPath).absoluteFilePath());
+	QCOMPARE(colorAt(newPath), QColor(Qt::blue));
 
 	releaseOld.release();
 	released = true;
 	QTRY_VERIFY(published.contains(oldJob.id));
 	QVERIFY(published.value(oldJob.id).isEmpty());
-	QCOMPARE(colorAt(path), QColor(Qt::blue));
-	QCOMPARE(filesIn(dir), QStringList {"image-DISPLAY1"});
+	QCOMPARE(colorAt(newPath), QColor(Qt::blue));
+	QCOMPARE(filesIn(dir), QStringList {QFileInfo(newPath).fileName()});
 }
 
 void TestScreenshotJobs::staleWriterReleasedLast() { this->releasedLast(false); }
+
+void TestScreenshotJobs::caseInsensitiveDestination() { this->releasedLast(false, true); }
 
 void TestScreenshotJobs::cancelledWriterReleasedLast() { this->releasedLast(true); }
 

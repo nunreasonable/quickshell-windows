@@ -35,11 +35,16 @@ public:
 	static bool write(const Job& job, const QImage& image, int quality);
 
 private:
+	struct Removal {
+		QString path;
+		int attempts;
+	};
+
 	void retryRemovals();
 
 	QHash<int, Job> jobs;
 	QHash<QString, int> destinations;
-	QHash<QString, int> removals;
+	QHash<QString, Removal> removals;
 	QTimer removalRetry;
 	int nextId = 1;
 };
